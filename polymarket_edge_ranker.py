@@ -7,6 +7,7 @@ where:
     win_edge  = 1 - avgPrice  for profitable closed positions
     loss_risk = avgPrice      for losing closed positions
     Net Edge  = sum(win_edge) - sum(loss_risk)
+    adjustedWinRate = Wilson lower-bound win rate - average resolved entry price
 
 This is a statistical ranking tool, not proof of insider trading.
 """
@@ -468,6 +469,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) ->
     total_bought = 0.0
     gross_profit = 0.0
     gross_loss = 0.0
+    sum_resolved_entry_price = 0.0
     current_consecutive_wins = 0
     current_consecutive_losses = 0
     max_consecutive_wins = 0
@@ -490,6 +492,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) ->
 
         if pnl > 0:
             wins += 1
+            sum_resolved_entry_price += avg_price
             gross_profit += pnl
             current_consecutive_wins += 1
             current_consecutive_losses = 0
@@ -499,6 +502,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) ->
             sum_win_edge_sq += edge * edge
         elif pnl < 0:
             losses += 1
+            sum_resolved_entry_price += avg_price
             gross_loss += abs(pnl)
             current_consecutive_losses += 1
             current_consecutive_wins = 0
@@ -517,7 +521,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) ->
     edge_rally_raw = 0.0
     edge_rally = net_edge_score
     win_rate = wins / resolved if resolved else 0.0
-    adjusted_win_rate = wilson_lower_bound(wins, resolved)
+    avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
+    adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
     roi_closed = realized_pnl / total_bought if total_bought > 0 else 0.0
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
     recovery_factor = realized_pnl / max_drawdown if max_drawdown > 0 else 0.0
