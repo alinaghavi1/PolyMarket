@@ -21,13 +21,16 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from datetime import datetime
 from typing import Any
 
 
@@ -151,6 +154,36 @@ MIN_CLOSED_REALIZED_PNL = 0.0
 # مقدار 1 از تقسیم بر صفر جلوگیری می‌کند و جلوی امتیازهای مصنوعی خیلی بزرگ را می‌گیرد.
 SMOOTHING = 1.0
 
+# فیلتر منفی بودن موجودی اخیر همه معاملات؛ اگر روشن باشد والت‌هایی که مقدار فعلی همه معاملاتشان منفی است حذف می‌شوند.
+FILTER_ALL_RECENT_BALANCES_NEGATIVE = True
+
+# فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
+FILTER_NEGATIVE_NET_EDGE = True
+
+# فیلتر حداقل Recovery Factor؛ پیش‌فرض خاموش است و فقط وقتی روشن شود مقدار زیر اعمال می‌شود.
+FILTER_MIN_RECOVERY_FACTOR = False
+
+# حداقل Recovery Factor قابل قبول وقتی فیلتر بالا روشن باشد.
+MIN_RECOVERY_FACTOR = 1.0
+
+# فیلتر فعالیت ۷ روز اخیر؛ اگر روشن باشد والت بدون معامله باز/بسته‌شده در ۷ روز اخیر حذف می‌شود.
+FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
+
+# تعداد روز برای فیلتر فعالیت اخیر.
+RECENT_ACTIVITY_DAYS = 7
+
+# فیلتر معاملات کوتاه‌مدت؛ اگر روشن باشد والت‌هایی که درصد زیادی معامله زیر زمان مشخص دارند حذف می‌شوند.
+FILTER_SHORT_HOLD_RATIO = True
+
+# حداکثر درصد معاملات کوتاه‌مدت مجاز؛ 0.25 یعنی ۲۵ درصد.
+MAX_SHORT_HOLD_RATIO = 0.25
+
+# مرز زمانی معامله کوتاه‌مدت بر حسب ساعت؛ 24 یعنی کمتر از ۲۴ ساعت.
+SHORT_HOLD_MAX_HOURS = 24.0
+
+# حذف کامل والت‌های فیلترشده از بکاپ‌ها/حافظه‌ها؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
+PURGE_FILTERED_WALLETS_FROM_BACKUPS = False
+
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -224,6 +257,7 @@ class WalletSeed:
     verified_badge: bool = False
     best_pnl: float = 0.0
     best_vol: float = 0.0
+    profile_views: int = 0
     leaderboard_hits: int = 0
     best_rank_seen: int = 10**9
     modes: set[str] = field(default_factory=set)
@@ -234,6 +268,17 @@ class WalletSeed:
         self.verified_badge = bool(self.verified_badge or row.get("verifiedBadge"))
         self.best_pnl = max(self.best_pnl, safe_float(row.get("pnl")))
         self.best_vol = max(self.best_vol, safe_float(row.get("vol")))
+        self.profile_views = max(
+            self.profile_views,
+            int(
+                safe_float(
+                    row.get("profileViews")
+                    or row.get("profileViewCount")
+                    or row.get("views")
+                    or row.get("viewCount")
+                )
+            ),
+        )
         self.leaderboard_hits += 1
         self.modes.add(mode)
         try:
@@ -350,6 +395,7 @@ def write_wallet_universe_csv(wallets: dict[str, WalletSeed], path: Path) -> Non
                 "verifiedBadge",
                 "bestPnl",
                 "bestVol",
+                "profileViews",
                 "roiProxy",
                 "leaderboardHits",
                 "bestRankSeen",
@@ -371,6 +417,7 @@ def write_wallet_universe_csv(wallets: dict[str, WalletSeed], path: Path) -> Non
                     "verifiedBadge": wallet.verified_badge,
                     "bestPnl": wallet.best_pnl,
                     "bestVol": wallet.best_vol,
+                    "profileViews": wallet.profile_views,
                     "roiProxy": roi_proxy,
                     "leaderboardHits": wallet.leaderboard_hits,
                     "bestRankSeen": wallet.best_rank_seen,
@@ -392,6 +439,7 @@ def load_wallet_universe(path: Path) -> dict[str, WalletSeed]:
                 verified_badge=str(row.get("verifiedBadge", "")).lower() == "true",
                 best_pnl=safe_float(row.get("bestPnl")),
                 best_vol=safe_float(row.get("bestVol")),
+                profile_views=int(safe_float(row.get("profileViews"))),
                 leaderboard_hits=int(safe_float(row.get("leaderboardHits"))),
                 best_rank_seen=int(safe_float(row.get("bestRankSeen"), 10**9)),
                 modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else set(),
@@ -459,6 +507,42 @@ def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     return (centre - margin) / denom
 
 
+def parse_timestamp(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        return timestamp / 1000.0 if timestamp > 10_000_000_000 else timestamp
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        timestamp = float(text)
+        return timestamp / 1000.0 if timestamp > 10_000_000_000 else timestamp
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def first_timestamp(pos: dict[str, Any], keys: list[str]) -> float | None:
+    for key in keys:
+        timestamp = parse_timestamp(pos.get(key))
+        if timestamp is not None:
+            return timestamp
+    return None
+
+
+def current_position_value(pos: dict[str, Any]) -> float:
+    return safe_float(
+        pos.get("currentValue")
+        or pos.get("curValue")
+        or pos.get("value")
+        or pos.get("cashPnl")
+        or pos.get("realizedPnl")
+    )
+
+
 def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> dict[str, Any]:
     wins = 0
     losses = 0
@@ -480,6 +564,13 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     equity = 0.0
     peak_equity = 0.0
     max_drawdown = 0.0
+    recent_balance_values: list[float] = []
+    recent_activity_count = 0
+    short_hold_count = 0
+    hold_duration_count = 0
+    now_ts = time.time()
+    recent_cutoff = now_ts - RECENT_ACTIVITY_DAYS * 24 * 60 * 60
+    short_hold_seconds = SHORT_HOLD_MAX_HOURS * 60 * 60
 
     for pos in positions:
         avg_price = min(max(safe_float(pos.get("avgPrice")), 0.0), 1.0)
@@ -491,6 +582,21 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         equity += pnl
         peak_equity = max(peak_equity, equity)
         max_drawdown = max(max_drawdown, peak_equity - equity)
+        recent_balance_values.append(current_position_value(pos))
+
+        open_ts = first_timestamp(pos, ["openTimestamp", "openedAt", "createdAt", "timestamp", "created"])
+        close_ts = first_timestamp(
+            pos,
+            ["closeTimestamp", "closedAt", "resolvedAt", "redeemedAt", "updatedAt", "timestamp"],
+        )
+        if (open_ts is not None and open_ts >= recent_cutoff) or (
+            close_ts is not None and close_ts >= recent_cutoff
+        ):
+            recent_activity_count += 1
+        if open_ts is not None and close_ts is not None and close_ts >= open_ts:
+            hold_duration_count += 1
+            if close_ts - open_ts < short_hold_seconds:
+                short_hold_count += 1
 
         if pnl > 0:
             wins += 1
@@ -528,6 +634,11 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     roi_closed = realized_pnl / total_bought if total_bought > 0 else 0.0
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
     recovery_factor = realized_pnl / max_drawdown if max_drawdown > 0 else 0.0
+    net_edge_to_max_drawdown = net_edge / max_drawdown if max_drawdown > 0 else 0.0
+    short_hold_ratio = short_hold_count / hold_duration_count if hold_duration_count else 0.0
+    all_recent_balances_negative = bool(recent_balance_values) and all(
+        value < 0 for value in recent_balance_values
+    )
     expected_payoff = realized_pnl / resolved if resolved else 0.0
     if len(pnl_series) > 1:
         mean_pnl = sum(pnl_series) / len(pnl_series)
@@ -559,12 +670,18 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "maxDrawdown": max_drawdown,
         "profitFactor": profit_factor,
         "recoveryFactor": recovery_factor,
+        "netEdgeToMaxDrawdown": net_edge_to_max_drawdown,
         "sharpeRatio": sharpe_ratio,
         "expectedPayoff": expected_payoff,
         "maxConsecutiveWins": max_consecutive_wins,
         "maxConsecutiveLosses": max_consecutive_losses,
         "grossProfit": gross_profit,
         "grossLoss": gross_loss,
+        "recentActivityCount": recent_activity_count,
+        "shortHoldCount": short_hold_count,
+        "holdDurationCount": hold_duration_count,
+        "shortHoldRatio": short_hold_ratio,
+        "allRecentBalancesNegative": all_recent_balances_negative,
     }
 
 
@@ -641,6 +758,7 @@ def rank_wallets(
                         + "\n"
                     )
                     raw_file.flush()
+                    cached_positions[seed.proxy_wallet] = positions
                 except Exception as exc:
                     fail_writer.writerow({"proxyWallet": seed.proxy_wallet, "error": repr(exc)})
                     fail_file.flush()
@@ -677,6 +795,20 @@ def rank_wallets(
                 )
                 tested_wallets.add(seed.proxy_wallet)
                 continue
+            filter_reason = mode_2_filter_reason(score)
+            if filter_reason:
+                write_test_memory_row(
+                    memory_writer,
+                    memory_file,
+                    seed,
+                    status="filtered",
+                    reason=filter_reason,
+                )
+                tested_wallets.add(seed.proxy_wallet)
+                if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
+                    cached_positions.pop(seed.proxy_wallet, None)
+                    page_cache.pop(seed.proxy_wallet, None)
+                continue
 
             roi_proxy = seed.best_pnl / seed.best_vol if seed.best_vol > 0 else 0.0
             score_row = {
@@ -686,6 +818,7 @@ def rank_wallets(
                 "verifiedBadge": seed.verified_badge,
                 "bestPnlLeaderboard": seed.best_pnl,
                 "bestVolLeaderboard": seed.best_vol,
+                "profileViews": seed.profile_views,
                 "roiProxyLeaderboard": roi_proxy,
                 "leaderboardHits": seed.leaderboard_hits,
                 "bestRankSeen": seed.best_rank_seen,
@@ -704,6 +837,32 @@ def rank_wallets(
             tested_wallets.add(seed.proxy_wallet)
 
     write_sorted_scores_csv(score_by_wallet.values(), score_path, score_fieldnames)
+    write_factor_result_files(score_by_wallet.values(), out_dir, score_fieldnames)
+    write_scores_xlsx(score_by_wallet.values(), out_dir / "edge_scores.xlsx", score_fieldnames)
+    if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
+        rewrite_closed_positions_cache(raw_path, cached_positions)
+        rewrite_closed_position_page_cache(page_cache_path, page_cache)
+
+
+def mode_2_filter_reason(score: dict[str, Any]) -> str:
+    if FILTER_ALL_RECENT_BALANCES_NEGATIVE and score["allRecentBalancesNegative"]:
+        return "all recent balances are negative"
+    if FILTER_NEGATIVE_NET_EDGE and score["netEdge"] < 0:
+        return f"netEdge {score['netEdge']} < 0"
+    if FILTER_MIN_RECOVERY_FACTOR and score["recoveryFactor"] < MIN_RECOVERY_FACTOR:
+        return f"recoveryFactor {score['recoveryFactor']} < {MIN_RECOVERY_FACTOR}"
+    if FILTER_NO_RECENT_7D_OPEN_OR_CLOSE and score["recentActivityCount"] <= 0:
+        return f"no open/close activity in last {RECENT_ACTIVITY_DAYS} days"
+    if (
+        FILTER_SHORT_HOLD_RATIO
+        and score["holdDurationCount"] > 0
+        and score["shortHoldRatio"] > MAX_SHORT_HOLD_RATIO
+    ):
+        return (
+            f"shortHoldRatio {score['shortHoldRatio']} > {MAX_SHORT_HOLD_RATIO} "
+            f"for holds under {SHORT_HOLD_MAX_HOURS}h"
+        )
+    return ""
 
 
 def load_closed_positions_cache(raw_path: Path) -> dict[str, list[dict[str, Any]]]:
@@ -744,6 +903,28 @@ def load_closed_position_page_cache(
             if wallet and offset >= 0 and isinstance(rows, list):
                 cached.setdefault(wallet, {})[offset] = rows
     return cached
+
+
+def rewrite_closed_positions_cache(raw_path: Path, cached: dict[str, list[dict[str, Any]]]) -> None:
+    with raw_path.open("w", encoding="utf-8") as file:
+        for wallet, positions in cached.items():
+            file.write(json.dumps({"proxyWallet": wallet, "positions": positions}, ensure_ascii=False) + "\n")
+
+
+def rewrite_closed_position_page_cache(
+    page_cache_path: Path,
+    cached: dict[str, dict[int, list[dict[str, Any]]]],
+) -> None:
+    with page_cache_path.open("w", encoding="utf-8") as file:
+        for wallet, offsets in cached.items():
+            for offset, rows in sorted(offsets.items()):
+                file.write(
+                    json.dumps(
+                        {"proxyWallet": wallet, "offset": offset, "rows": rows},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
 
 def load_test_memory(memory_path: Path) -> set[str]:
@@ -803,6 +984,102 @@ def write_sorted_scores_csv(rows: Any, path: Path, fieldnames: list[str]) -> Non
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def sorted_rows_by_factor(rows: Any, factor: str, descending: bool = True) -> list[dict[str, Any]]:
+    score_rows = [dict(row) for row in rows if row and row.get("proxyWallet")]
+    score_rows.sort(key=lambda row: safe_float(row.get(factor)), reverse=descending)
+    return score_rows
+
+
+def write_scores_csv(rows: Any, path: Path, fieldnames: list[str], sort_factor: str, descending: bool) -> None:
+    score_rows = sorted_rows_by_factor(rows, sort_factor, descending)
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for rank, row in enumerate(score_rows, start=1):
+            row = dict(row)
+            row["rank"] = rank
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -> None:
+    factors = [
+        ("netEdge", True),
+        ("netEdgeScore", True),
+        ("adjustedWinRate", True),
+        ("winRate", True),
+        ("realizedPnlClosed", True),
+        ("roiClosed", True),
+        ("maxDrawdown", False),
+        ("profitFactor", True),
+        ("recoveryFactor", True),
+        ("netEdgeToMaxDrawdown", True),
+        ("sharpeRatio", True),
+        ("expectedPayoff", True),
+        ("shortHoldRatio", False),
+        ("profileViews", True),
+    ]
+    for factor, descending in factors:
+        write_scores_csv(rows, out_dir / f"edge_scores_by_{factor}.csv", fieldnames, factor, descending)
+
+
+def excel_column_name(index: int) -> str:
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def excel_cell_value(value: Any) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def write_scores_xlsx(rows: Any, path: Path, fieldnames: list[str]) -> None:
+    score_rows = sorted_score_rows(rows)
+    all_rows = [fieldnames]
+    for rank, row in enumerate(score_rows, start=1):
+        row = dict(row)
+        row["rank"] = rank
+        all_rows.append([row.get(key, "") for key in fieldnames])
+    column_widths = []
+    for col_index, field in enumerate(fieldnames):
+        max_len = max(len(str(row[col_index])) for row in all_rows)
+        column_widths.append(min(max(max_len + 2, 12), 80))
+    cols_xml = "<cols>" + "".join(
+        f'<col min="{idx}" max="{idx}" width="{width}" customWidth="1"/>'
+        for idx, width in enumerate(column_widths, start=1)
+    ) + "</cols>"
+    sheet_rows = []
+    for row_index, row in enumerate(all_rows, start=1):
+        cells = []
+        for col_index, value in enumerate(row, start=1):
+            ref = f"{excel_column_name(col_index)}{row_index}"
+            if isinstance(value, bool):
+                cells.append(f'<c r="{ref}" t="b"><v>{1 if value else 0}</v></c>')
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+            else:
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{excel_cell_value(value)}</t></is></c>')
+        sheet_rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+    worksheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"{cols_xml}<sheetData>{''.join(sheet_rows)}</sheetData></worksheet>"
+    )
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as xlsx:
+        xlsx.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+        xlsx.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        xlsx.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="edge_scores" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        xlsx.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        xlsx.writestr("xl/worksheets/sheet1.xml", worksheet)
+
+
 def get_score_fieldnames() -> list[str]:
     return [
         "rank",
@@ -829,16 +1106,23 @@ def get_score_fieldnames() -> list[str]:
         "maxDrawdown",
         "profitFactor",
         "recoveryFactor",
+        "netEdgeToMaxDrawdown",
         "sharpeRatio",
         "expectedPayoff",
         "maxConsecutiveWins",
         "maxConsecutiveLosses",
         "grossProfit",
         "grossLoss",
+        "recentActivityCount",
+        "shortHoldCount",
+        "holdDurationCount",
+        "shortHoldRatio",
+        "allRecentBalancesNegative",
         "edgeRally",
         "edgeRallyRaw",
         "bestPnlLeaderboard",
         "bestVolLeaderboard",
+        "profileViews",
         "roiProxyLeaderboard",
         "leaderboardHits",
         "bestRankSeen",
@@ -928,6 +1212,15 @@ def print_active_settings(
             f"min_positions={min_positions} "
             f"min_losses={min_losses} "
             f"min_pnl={min_pnl}"
+        )
+        print(
+            "[mode 2 filters] "
+            f"all_recent_balances_negative={FILTER_ALL_RECENT_BALANCES_NEGATIVE} "
+            f"negative_net_edge={FILTER_NEGATIVE_NET_EDGE} "
+            f"min_recovery_factor={FILTER_MIN_RECOVERY_FACTOR}:{MIN_RECOVERY_FACTOR} "
+            f"recent_activity_days={FILTER_NO_RECENT_7D_OPEN_OR_CLOSE}:{RECENT_ACTIVITY_DAYS} "
+            f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
+            f"purge_filtered_backups={PURGE_FILTERED_WALLETS_FROM_BACKUPS}"
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
