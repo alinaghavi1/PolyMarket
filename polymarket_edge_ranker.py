@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
 Build a broad Polymarket wallet universe from every official leaderboard mode,
-then rank wallets with the Net Edge score:
+then rank wallets with the Edge Rally × Net Edge score:
 
 where:
     win_edge  = 1 - avgPrice  for profitable closed positions
     loss_risk = avgPrice      for losing closed positions
     Net Edge  = sum(win_edge) - sum(loss_risk)
+    Edge Rally Raw = sum(win_edge^2) / (sum(loss_risk^2) + 1)
+    Final Edge Rally Score = Edge Rally Raw × Net Edge
     adjustedWinRate = Wilson lower-bound win rate - average resolved entry price
 
 This is a statistical ranking tool, not proof of insider trading.
@@ -55,7 +57,7 @@ BASE_URL = "https://data-api.polymarket.com"
 
 # مود اجرا:
 #   1 = استخراج والت‌ها از همه حالت‌های لیدربورد
-#   2 = تست کردن والت‌های استخراج‌شده و محاسبه Net Edge Score
+#   2 = تست کردن والت‌های استخراج‌شده و محاسبه Edge Rally × Net Edge Score
 RUN_MODE = 2
 
 # پوشه خروجی. برای اینکه مود 2 بتواند خروجی مود 1 را بخواند، بین دو مود تغییرش نده.
@@ -145,9 +147,9 @@ MIN_LOSING_POSITIONS = 0
 # برای تست آزاد می‌توانی عدد منفی خیلی بزرگ بگذاری.
 MIN_CLOSED_REALIZED_PNL = 0.0
 
-# این مقدار فعلاً فقط برای سازگاری با نسخه‌های قبلی مانده است.
-# در نسخه فعلی score اصلی فقط netEdge است و هیچ تقسیمی انجام نمی‌شود.
-SMOOTHING = 0.01
+# smoothing مخرج فرمول Edge Rally.
+# مقدار 1 از تقسیم بر صفر جلوگیری می‌کند و جلوی امتیازهای مصنوعی خیلی بزرگ را می‌گیرد.
+SMOOTHING = 1.0
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -457,7 +459,7 @@ def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     return (centre - margin) / denom
 
 
-def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) -> dict[str, Any]:
+def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> dict[str, Any]:
     wins = 0
     losses = 0
     breakeven = 0
@@ -517,9 +519,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 0.01) ->
 
     resolved = wins + losses
     net_edge = sum_win_edge - sum_loss_risk
-    net_edge_score = net_edge
-    edge_rally_raw = 0.0
-    edge_rally = net_edge_score
+    edge_rally_raw = sum_win_edge_sq / (sum_loss_risk_sq + smoothing)
+    edge_rally = edge_rally_raw * net_edge
+    net_edge_score = edge_rally
     win_rate = wins / resolved if resolved else 0.0
     avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
     adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
@@ -781,7 +783,7 @@ def sorted_score_rows(rows: Any) -> list[dict[str, Any]]:
     score_rows = [dict(row) for row in rows if row and row.get("proxyWallet")]
     score_rows.sort(
         key=lambda row: (
-            safe_float(row.get("netEdgeScore"), safe_float(row.get("netEdge"))),
+            safe_float(row.get("edgeRally"), safe_float(row.get("netEdgeScore"), safe_float(row.get("netEdge")))),
             safe_float(row.get("adjustedWinRate")),
             safe_float(row.get("expectedPayoff")),
         ),
