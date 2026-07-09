@@ -189,10 +189,10 @@ MAX_SHORT_HOLD_RATIO = 0.25
 # مرز زمانی معامله کوتاه‌مدت بر حسب ساعت؛ 24 یعنی کمتر از ۲۴ ساعت.
 SHORT_HOLD_MAX_HOURS = 24.0
 
-# حذف والت‌های فیلترشده از دو فایل دیتای پوزیشن jsonl؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
+# حذف همزمان والت‌های فیلترشده از دو فایل دیتای پوزیشن jsonl؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
 PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS = False
 
-# حذف والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
+# حذف همزمان والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
 PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = False
 
 # آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
@@ -814,10 +814,15 @@ def rank_wallets(
                     reason=f"resolvedPositions {score['resolvedPositions']} < {min_positions}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
-                filtered_wallets_to_purge.add(seed.proxy_wallet)
-                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
-                    cached_positions.pop(seed.proxy_wallet, None)
-                    page_cache.pop(seed.proxy_wallet, None)
+                purge_filtered_wallet_now(
+                    seed.proxy_wallet,
+                    filtered_wallets_to_purge,
+                    cached_positions,
+                    page_cache,
+                    raw_path,
+                    page_cache_path,
+                    universe_path,
+                )
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -839,10 +844,15 @@ def rank_wallets(
                     reason=f"losses {score['losses']} < {min_losses}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
-                filtered_wallets_to_purge.add(seed.proxy_wallet)
-                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
-                    cached_positions.pop(seed.proxy_wallet, None)
-                    page_cache.pop(seed.proxy_wallet, None)
+                purge_filtered_wallet_now(
+                    seed.proxy_wallet,
+                    filtered_wallets_to_purge,
+                    cached_positions,
+                    page_cache,
+                    raw_path,
+                    page_cache_path,
+                    universe_path,
+                )
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -864,10 +874,15 @@ def rank_wallets(
                     reason=f"realizedPnlClosed {score['realizedPnlClosed']} < {min_pnl}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
-                filtered_wallets_to_purge.add(seed.proxy_wallet)
-                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
-                    cached_positions.pop(seed.proxy_wallet, None)
-                    page_cache.pop(seed.proxy_wallet, None)
+                purge_filtered_wallet_now(
+                    seed.proxy_wallet,
+                    filtered_wallets_to_purge,
+                    cached_positions,
+                    page_cache,
+                    raw_path,
+                    page_cache_path,
+                    universe_path,
+                )
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -890,10 +905,15 @@ def rank_wallets(
                     reason=filter_reason,
                 )
                 tested_wallets.add(seed.proxy_wallet)
-                filtered_wallets_to_purge.add(seed.proxy_wallet)
-                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
-                    cached_positions.pop(seed.proxy_wallet, None)
-                    page_cache.pop(seed.proxy_wallet, None)
+                purge_filtered_wallet_now(
+                    seed.proxy_wallet,
+                    filtered_wallets_to_purge,
+                    cached_positions,
+                    page_cache,
+                    raw_path,
+                    page_cache_path,
+                    universe_path,
+                )
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -1040,6 +1060,25 @@ def rewrite_wallet_universe_without_wallets(universe_path: Path, wallets_to_remo
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def purge_filtered_wallet_now(
+    wallet: str,
+    filtered_wallets_to_purge: set[str],
+    cached_positions: dict[str, list[dict[str, Any]]],
+    page_cache: dict[str, dict[int, list[dict[str, Any]]]],
+    raw_path: Path,
+    page_cache_path: Path,
+    universe_path: Path,
+) -> None:
+    filtered_wallets_to_purge.add(wallet)
+    if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
+        cached_positions.pop(wallet, None)
+        page_cache.pop(wallet, None)
+        rewrite_closed_positions_cache(raw_path, cached_positions)
+        rewrite_closed_position_page_cache(page_cache_path, page_cache)
+    if PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE:
+        rewrite_wallet_universe_without_wallets(universe_path, filtered_wallets_to_purge)
 
 
 def load_test_memory(memory_path: Path) -> set[str]:
