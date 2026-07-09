@@ -51,8 +51,8 @@ from typing import Any
 #   wallet_test_memory.csv     حافظه تست؛ اگر پاکش کنی تست از اول شروع می‌شود
 #   closed_positions_raw.jsonl دیتای خام کامل هر والت؛ برای فرمول‌های بعدی نگهش دار
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
-#   edge_scores_progress.csv   خروجی زنده؛ بعد از هر والت مرتب و آپدیت می‌شود
-#   edge_scores.xlsx           خروجی نهایی مرتب‌شده بعد از پایان کار
+#   edge_scores_progress.csv   خروجی زنده CSV؛ بعد از هر والت مرتب و آپدیت می‌شود
+#   edge_scores.xlsx           خروجی آماری XLSX؛ بعد از هر والت آپدیت می‌شود
 # =============================================================================
 
 # آدرس API عمومی پلی‌مارکت. معمولاً لازم نیست تغییرش بدهی.
@@ -183,6 +183,9 @@ SHORT_HOLD_MAX_HOURS = 24.0
 
 # حذف کامل والت‌های فیلترشده از بکاپ‌ها/حافظه‌ها؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
 PURGE_FILTERED_WALLETS_FROM_BACKUPS = False
+
+# آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
+UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = True
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -762,6 +765,7 @@ def rank_wallets(
                 except Exception as exc:
                     fail_writer.writerow({"proxyWallet": seed.proxy_wallet, "error": repr(exc)})
                     fail_file.flush()
+                    write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                     continue
 
             score = score_positions(positions, smoothing=smoothing)
@@ -774,6 +778,7 @@ def rank_wallets(
                     reason=f"resolvedPositions {score['resolvedPositions']} < {min_positions}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                 continue
             if score["losses"] < min_losses:
                 write_test_memory_row(
@@ -784,6 +789,7 @@ def rank_wallets(
                     reason=f"losses {score['losses']} < {min_losses}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                 continue
             if score["realizedPnlClosed"] < min_pnl:
                 write_test_memory_row(
@@ -794,6 +800,7 @@ def rank_wallets(
                     reason=f"realizedPnlClosed {score['realizedPnlClosed']} < {min_pnl}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                 continue
             filter_reason = mode_2_filter_reason(score)
             if filter_reason:
@@ -808,6 +815,7 @@ def rank_wallets(
                 if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
                     cached_positions.pop(seed.proxy_wallet, None)
                     page_cache.pop(seed.proxy_wallet, None)
+                write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                 continue
 
             roi_proxy = seed.best_pnl / seed.best_vol if seed.best_vol > 0 else 0.0
@@ -835,9 +843,9 @@ def rank_wallets(
                 reason="ok",
             )
             tested_wallets.add(seed.proxy_wallet)
+            write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
 
-    write_scores_xlsx(score_by_wallet.values(), score_path, score_fieldnames)
-    write_factor_result_files(score_by_wallet.values(), out_dir, score_fieldnames)
+    write_all_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
     if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
         rewrite_closed_positions_cache(raw_path, cached_positions)
         rewrite_closed_position_page_cache(page_cache_path, page_cache)
@@ -1026,6 +1034,16 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
             descending=descending,
             sheet_name=f"by_{factor}",
         )
+
+
+def write_all_score_outputs(rows: Any, score_path: Path, out_dir: Path, fieldnames: list[str]) -> None:
+    write_scores_xlsx(rows, score_path, fieldnames)
+    write_factor_result_files(rows, out_dir, fieldnames)
+
+
+def write_live_score_outputs(rows: Any, score_path: Path, out_dir: Path, fieldnames: list[str]) -> None:
+    if UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET:
+        write_all_score_outputs(rows, score_path, out_dir, fieldnames)
 
 
 def excel_column_name(index: int) -> str:
@@ -1236,7 +1254,8 @@ def print_active_settings(
             f"min_recovery_factor={FILTER_MIN_RECOVERY_FACTOR}:{MIN_RECOVERY_FACTOR} "
             f"recent_activity_days={FILTER_NO_RECENT_7D_OPEN_OR_CLOSE}:{RECENT_ACTIVITY_DAYS} "
             f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
-            f"purge_filtered_backups={PURGE_FILTERED_WALLETS_FROM_BACKUPS}"
+            f"purge_filtered_backups={PURGE_FILTERED_WALLETS_FROM_BACKUPS} "
+            f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET}"
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
