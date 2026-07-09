@@ -189,8 +189,11 @@ MAX_SHORT_HOLD_RATIO = 0.25
 # مرز زمانی معامله کوتاه‌مدت بر حسب ساعت؛ 24 یعنی کمتر از ۲۴ ساعت.
 SHORT_HOLD_MAX_HOURS = 24.0
 
-# حذف کامل والت‌های فیلترشده از بکاپ‌ها/حافظه‌ها؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
-PURGE_FILTERED_WALLETS_FROM_BACKUPS = False
+# حذف والت‌های فیلترشده از دو فایل دیتای پوزیشن jsonl؛ پیش‌فرض خاموش است تا دیتای خام حفظ شود.
+PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS = False
+
+# حذف والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
+PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = False
 
 # آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
 UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = True
@@ -715,6 +718,7 @@ def rank_wallets(
     progress_path = out_dir / "edge_scores_progress.csv"
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
+    universe_path = out_dir / "wallet_universe.csv"
 
     ranked_wallets = sorted(wallets.values(), key=lambda item: item.best_pnl, reverse=True)
     if max_wallets:
@@ -728,6 +732,7 @@ def rank_wallets(
     }
     not_saved_reasons_by_wallet: dict[str, dict[str, Any]] = {}
     not_saved_reason_stats: dict[str, dict[str, Any]] = {}
+    filtered_wallets_to_purge: set[str] = set()
     tested_wallets = load_test_memory(memory_path)
     if tested_wallets:
         print(f"[resume] loaded test memory for {len(tested_wallets)} wallets", flush=True)
@@ -809,6 +814,10 @@ def rank_wallets(
                     reason=f"resolvedPositions {score['resolvedPositions']} < {min_positions}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                filtered_wallets_to_purge.add(seed.proxy_wallet)
+                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
+                    cached_positions.pop(seed.proxy_wallet, None)
+                    page_cache.pop(seed.proxy_wallet, None)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -830,6 +839,10 @@ def rank_wallets(
                     reason=f"losses {score['losses']} < {min_losses}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                filtered_wallets_to_purge.add(seed.proxy_wallet)
+                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
+                    cached_positions.pop(seed.proxy_wallet, None)
+                    page_cache.pop(seed.proxy_wallet, None)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -851,6 +864,10 @@ def rank_wallets(
                     reason=f"realizedPnlClosed {score['realizedPnlClosed']} < {min_pnl}",
                 )
                 tested_wallets.add(seed.proxy_wallet)
+                filtered_wallets_to_purge.add(seed.proxy_wallet)
+                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
+                    cached_positions.pop(seed.proxy_wallet, None)
+                    page_cache.pop(seed.proxy_wallet, None)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
                     not_saved_reason_stats,
@@ -873,7 +890,8 @@ def rank_wallets(
                     reason=filter_reason,
                 )
                 tested_wallets.add(seed.proxy_wallet)
-                if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
+                filtered_wallets_to_purge.add(seed.proxy_wallet)
+                if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
                     cached_positions.pop(seed.proxy_wallet, None)
                     page_cache.pop(seed.proxy_wallet, None)
                 write_not_saved_reason(
@@ -917,9 +935,11 @@ def rank_wallets(
             write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
 
     write_all_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
-    if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
+    if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
         rewrite_closed_positions_cache(raw_path, cached_positions)
         rewrite_closed_position_page_cache(page_cache_path, page_cache)
+    if PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE and filtered_wallets_to_purge:
+        rewrite_wallet_universe_without_wallets(universe_path, filtered_wallets_to_purge)
 
 
 def mode_2_filter_reason(score: dict[str, Any]) -> str:
@@ -1003,6 +1023,23 @@ def rewrite_closed_position_page_cache(
                     )
                     + "\n"
                 )
+
+
+def rewrite_wallet_universe_without_wallets(universe_path: Path, wallets_to_remove: set[str]) -> None:
+    if not universe_path.exists():
+        return
+    with universe_path.open("r", newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        fieldnames = list(reader.fieldnames or [])
+        rows = [
+            row
+            for row in reader
+            if str(row.get("proxyWallet") or "").lower() not in wallets_to_remove
+        ]
+    with universe_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def load_test_memory(memory_path: Path) -> set[str]:
@@ -1443,7 +1480,8 @@ def print_active_settings(
             f"min_recovery_factor={FILTER_MIN_RECOVERY_FACTOR}:{MIN_RECOVERY_FACTOR} "
             f"recent_activity_days={FILTER_NO_RECENT_7D_OPEN_OR_CLOSE}:{RECENT_ACTIVITY_DAYS} "
             f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
-            f"purge_filtered_backups={PURGE_FILTERED_WALLETS_FROM_BACKUPS} "
+            f"purge_position_jsonl={PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS} "
+            f"purge_wallet_universe={PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE} "
             f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET}"
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
