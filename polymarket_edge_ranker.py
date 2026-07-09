@@ -52,7 +52,7 @@ from typing import Any
 #   closed_positions_raw.jsonl دیتای خام کامل هر والت؛ برای فرمول‌های بعدی نگهش دار
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
 #   edge_scores_progress.csv   خروجی زنده؛ بعد از هر والت مرتب و آپدیت می‌شود
-#   edge_scores.csv            خروجی نهایی مرتب‌شده بعد از پایان کار
+#   edge_scores.xlsx           خروجی نهایی مرتب‌شده بعد از پایان کار
 # =============================================================================
 
 # آدرس API عمومی پلی‌مارکت. معمولاً لازم نیست تغییرش بدهی.
@@ -698,7 +698,7 @@ def rank_wallets(
 ) -> None:
     raw_path = out_dir / RAW_CLOSED_POSITIONS_LOG_FILE_NAME
     fail_path = out_dir / "closed_positions_failed.csv"
-    score_path = out_dir / "edge_scores.csv"
+    score_path = out_dir / "edge_scores.xlsx"
     progress_path = out_dir / "edge_scores_progress.csv"
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
@@ -836,9 +836,8 @@ def rank_wallets(
             )
             tested_wallets.add(seed.proxy_wallet)
 
-    write_sorted_scores_csv(score_by_wallet.values(), score_path, score_fieldnames)
+    write_scores_xlsx(score_by_wallet.values(), score_path, score_fieldnames)
     write_factor_result_files(score_by_wallet.values(), out_dir, score_fieldnames)
-    write_scores_xlsx(score_by_wallet.values(), out_dir / "edge_scores.xlsx", score_fieldnames)
     if PURGE_FILTERED_WALLETS_FROM_BACKUPS:
         rewrite_closed_positions_cache(raw_path, cached_positions)
         rewrite_closed_position_page_cache(page_cache_path, page_cache)
@@ -1019,7 +1018,14 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("profileViews", True),
     ]
     for factor, descending in factors:
-        write_scores_csv(rows, out_dir / f"edge_scores_by_{factor}.csv", fieldnames, factor, descending)
+        write_scores_xlsx(
+            rows,
+            out_dir / f"edge_scores_by_{factor}.xlsx",
+            fieldnames,
+            sort_factor=factor,
+            descending=descending,
+            sheet_name=f"by_{factor}",
+        )
 
 
 def excel_column_name(index: int) -> str:
@@ -1040,8 +1046,17 @@ def excel_cell_value(value: Any) -> str:
     )
 
 
-def write_scores_xlsx(rows: Any, path: Path, fieldnames: list[str]) -> None:
-    score_rows = sorted_score_rows(rows)
+def write_scores_xlsx(
+    rows: Any,
+    path: Path,
+    fieldnames: list[str],
+    sort_factor: str | None = None,
+    descending: bool = True,
+    sheet_name: str = "edge_scores",
+) -> None:
+    score_rows = (
+        sorted_rows_by_factor(rows, sort_factor, descending) if sort_factor else sorted_score_rows(rows)
+    )
     all_rows = [fieldnames]
     for rank, row in enumerate(score_rows, start=1):
         row = dict(row)
@@ -1075,7 +1090,8 @@ def write_scores_xlsx(rows: Any, path: Path, fieldnames: list[str]) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as xlsx:
         xlsx.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
         xlsx.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        xlsx.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="edge_scores" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        safe_sheet_name = excel_cell_value(sheet_name[:31])
+        xlsx.writestr("xl/workbook.xml", f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{safe_sheet_name}" sheetId="1" r:id="rId1"/></sheets></workbook>')
         xlsx.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
         xlsx.writestr("xl/worksheets/sheet1.xml", worksheet)
 
@@ -1225,7 +1241,7 @@ def print_active_settings(
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
         print("[live output] edge_scores_progress.csv updates during scoring")
-        print("[final output] edge_scores.csv is sorted after scoring finishes")
+        print("[final output] edge_scores.xlsx and edge_scores_by_<factor>.xlsx are sorted after scoring finishes")
     print("")
 
 
@@ -1291,7 +1307,7 @@ def main() -> int:
         max_wallets=max_wallets,
         max_positions_per_wallet=max_positions_per_wallet,
     )
-    print(f"[done] results: {out_dir / 'edge_scores.csv'}", flush=True)
+    print(f"[done] results: {out_dir / 'edge_scores.xlsx'}", flush=True)
     return 0
 
 
