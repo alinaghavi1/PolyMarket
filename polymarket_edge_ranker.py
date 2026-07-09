@@ -54,6 +54,7 @@ from typing import Any
 #   edge_scores_progress.csv   خروجی زنده CSV؛ بعد از هر والت مرتب و آپدیت می‌شود
 #   edge_scores.xlsx           خروجی آماری XLSX؛ بعد از هر والت آپدیت می‌شود
 #   wallet_not_saved_reasons.xlsx دلیل ذخیره نشدن والت‌ها در خروجی آماری
+#   wallet_not_saved_reason_stats.xlsx آمار تعداد تکرار هر دلیل حذف
 # =============================================================================
 
 # آدرس API عمومی پلی‌مارکت. معمولاً لازم نیست تغییرش بدهی.
@@ -75,6 +76,9 @@ TEST_MEMORY_FILE_NAME = "wallet_test_memory.csv"
 
 # اسم فایل گزارش والت‌هایی که تحلیل شدند ولی وارد خروجی آماری نشدند.
 NOT_SAVED_REASONS_FILE_NAME = "wallet_not_saved_reasons.xlsx"
+
+# اسم فایل آمار تعداد تکرار دلیل‌های ذخیره نشدن والت‌ها.
+NOT_SAVED_REASON_STATS_FILE_NAME = "wallet_not_saved_reason_stats.xlsx"
 
 # اسم فایل دیتای خام کامل.
 # هر وقت یک والت کامل گرفته شد، همه پوزیشن‌های بسته‌شده‌اش اینجا ذخیره می‌شود.
@@ -707,6 +711,7 @@ def rank_wallets(
     fail_path = out_dir / "closed_positions_failed.csv"
     score_path = out_dir / "edge_scores.xlsx"
     not_saved_reasons_path = out_dir / NOT_SAVED_REASONS_FILE_NAME
+    not_saved_reason_stats_path = out_dir / NOT_SAVED_REASON_STATS_FILE_NAME
     progress_path = out_dir / "edge_scores_progress.csv"
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
@@ -722,6 +727,7 @@ def rank_wallets(
         if row.get("proxyWallet")
     }
     not_saved_reasons_by_wallet: dict[str, dict[str, Any]] = {}
+    not_saved_reason_stats: dict[str, dict[str, Any]] = {}
     tested_wallets = load_test_memory(memory_path)
     if tested_wallets:
         print(f"[resume] loaded test memory for {len(tested_wallets)} wallets", flush=True)
@@ -748,7 +754,9 @@ def rank_wallets(
                 if seed.proxy_wallet not in score_by_wallet:
                     write_not_saved_reason(
                         not_saved_reasons_by_wallet,
+                        not_saved_reason_stats,
                         not_saved_reasons_path,
+                        not_saved_reason_stats_path,
                         seed,
                         status="skipped",
                         reason="already in wallet_test_memory; delete memory file to retest and recover exact reason",
@@ -781,7 +789,9 @@ def rank_wallets(
                     fail_file.flush()
                     write_not_saved_reason(
                         not_saved_reasons_by_wallet,
+                        not_saved_reason_stats,
                         not_saved_reasons_path,
+                        not_saved_reason_stats_path,
                         seed,
                         status="fetch_failed",
                         reason=repr(exc),
@@ -801,7 +811,9 @@ def rank_wallets(
                 tested_wallets.add(seed.proxy_wallet)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
+                    not_saved_reason_stats,
                     not_saved_reasons_path,
+                    not_saved_reason_stats_path,
                     seed,
                     status="filtered",
                     reason=f"resolvedPositions {score['resolvedPositions']} < {min_positions}",
@@ -820,7 +832,9 @@ def rank_wallets(
                 tested_wallets.add(seed.proxy_wallet)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
+                    not_saved_reason_stats,
                     not_saved_reasons_path,
+                    not_saved_reason_stats_path,
                     seed,
                     status="filtered",
                     reason=f"losses {score['losses']} < {min_losses}",
@@ -839,7 +853,9 @@ def rank_wallets(
                 tested_wallets.add(seed.proxy_wallet)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
+                    not_saved_reason_stats,
                     not_saved_reasons_path,
+                    not_saved_reason_stats_path,
                     seed,
                     status="filtered",
                     reason=f"realizedPnlClosed {score['realizedPnlClosed']} < {min_pnl}",
@@ -862,7 +878,9 @@ def rank_wallets(
                     page_cache.pop(seed.proxy_wallet, None)
                 write_not_saved_reason(
                     not_saved_reasons_by_wallet,
+                    not_saved_reason_stats,
                     not_saved_reasons_path,
+                    not_saved_reason_stats_path,
                     seed,
                     status="filtered",
                     reason=filter_reason,
@@ -1041,9 +1059,45 @@ def get_not_saved_reason_fieldnames() -> list[str]:
     ]
 
 
+def get_not_saved_reason_stats_fieldnames() -> list[str]:
+    return [
+        "rank",
+        "reasonGroup",
+        "count",
+        "latestReason",
+        "latestWallet",
+        "latestUserName",
+        "latestAt",
+    ]
+
+
+def normalize_not_saved_reason(reason: str) -> str:
+    if re.match(r"recoveryFactor .+ < .+", reason):
+        return "recoveryFactor < minimum"
+    if re.match(r"netEdge .+ < 0", reason):
+        return "netEdge < 0"
+    if re.match(r"resolvedPositions .+ < .+", reason):
+        return "resolvedPositions < minimum"
+    if re.match(r"losses .+ < .+", reason):
+        return "losses < minimum"
+    if re.match(r"realizedPnlClosed .+ < .+", reason):
+        return "realizedPnlClosed < minimum"
+    if reason.startswith("no open/close activity in last"):
+        return "no recent open/close activity"
+    if reason.startswith("shortHoldRatio "):
+        return "shortHoldRatio > maximum"
+    if reason == "all recent balances are negative":
+        return "all recent balances are negative"
+    if reason.startswith("already in wallet_test_memory"):
+        return "skipped from wallet_test_memory"
+    return reason
+
+
 def write_not_saved_reason(
     rows_by_wallet: dict[str, dict[str, Any]],
+    stats_by_reason: dict[str, dict[str, Any]],
     path: Path,
+    stats_path: Path,
     seed: WalletSeed,
     status: str,
     reason: str,
@@ -1068,11 +1122,32 @@ def write_not_saved_reason(
         "allRecentBalancesNegative": score.get("allRecentBalancesNegative", ""),
         "testedAt": int(time.time()),
     }
+    reason_group = normalize_not_saved_reason(reason)
+    if reason_group not in stats_by_reason:
+        stats_by_reason[reason_group] = {
+            "reasonGroup": reason_group,
+            "count": 0,
+            "latestReason": "",
+            "latestWallet": "",
+            "latestUserName": "",
+            "latestAt": "",
+        }
+    stats_by_reason[reason_group]["count"] = int(stats_by_reason[reason_group]["count"]) + 1
+    stats_by_reason[reason_group]["latestReason"] = reason
+    stats_by_reason[reason_group]["latestWallet"] = seed.proxy_wallet
+    stats_by_reason[reason_group]["latestUserName"] = seed.user_name
+    stats_by_reason[reason_group]["latestAt"] = int(time.time())
     write_table_xlsx(
         rows_by_wallet.values(),
         path,
         get_not_saved_reason_fieldnames(),
         sheet_name="not_saved_reasons",
+    )
+    write_table_xlsx(
+        sorted(stats_by_reason.values(), key=lambda row: int(row["count"]), reverse=True),
+        stats_path,
+        get_not_saved_reason_stats_fieldnames(),
+        sheet_name="reason_stats",
     )
 
 
@@ -1373,6 +1448,7 @@ def print_active_settings(
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[not saved reasons] {NOT_SAVED_REASONS_FILE_NAME} shows why wallets did not enter score files")
+        print(f"[not saved reason stats] {NOT_SAVED_REASON_STATS_FILE_NAME} counts repeated removal reasons")
         print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
         print("[live output] edge_scores_progress.csv updates during scoring")
         print("[final output] edge_scores.xlsx and edge_scores_by_<factor>.xlsx are sorted after scoring finishes")
