@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
@@ -48,6 +49,7 @@ from typing import Any
 #
 # فایل‌های مهم خروجی:
 #   wallet_universe.csv        لیست والت‌های استخراج‌شده از لیدربوردها
+#   1.xlsx                     ورودی رتبه‌بندی‌شده مود 2؛ همان edge_scores_by_oneShareNetPnlAfterCosts.xlsx که اسمش را عوض کرده‌ای
 #   wallet_test_memory.csv     حافظه تست؛ اگر پاکش کنی تست از اول شروع می‌شود
 #   closed_positions_raw.jsonl دیتای خام کامل هر والت؛ برای فرمول‌های بعدی نگهش دار
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
@@ -89,6 +91,11 @@ RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw.jsonl"
 # اگر وسط گرفتن یک والت بزرگ قطع شود، صفحه‌های گرفته‌شده داخل این فایل می‌ماند.
 # اجرای بعدی همان والت را از offset بعدی ادامه می‌دهد، نه از اول.
 CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages.jsonl"
+
+# اگر روشن باشد، مود 2 به جای wallet_universe.csv از فایل رتبه‌بندی‌شده زیر استفاده می‌کند.
+# فایل edge_scores_by_oneShareNetPnlAfterCosts.xlsx را به این اسم تغییر بده تا برنامه از بالای لیست شروع کند.
+USE_ONE_SHARE_RANKING_INPUT = True
+ONE_SHARE_RANKING_INPUT_FILE_NAME = "1.xlsx"
 
 # تاخیر بین درخواست‌ها به API، بر حسب ثانیه.
 # عدد بالاتر = کندتر ولی امن‌تر برای rate limit / Cloudflare.
@@ -143,7 +150,7 @@ MAX_WALLETS_TO_SCORE = 1000000000000000
 # حداکثر چند closed position برای هر والت گرفته شود.
 # عدد کمتر = سریع‌تر ولی ممکن است دیتای والت‌های خیلی بزرگ کامل نباشد.
 # عدد بیشتر = کامل‌تر ولی کندتر.
-MAX_POSITIONS_PER_WALLET = 1000
+MAX_POSITIONS_PER_WALLET = 100000
 
 # حداقل تعداد پوزیشن بسته‌شده/نتیجه‌دار برای اینکه والت وارد خروجی score شود.
 # اگر 30 باشد، والت‌هایی با کمتر از 30 پوزیشن حذف می‌شوند.
@@ -163,10 +170,10 @@ MIN_CLOSED_REALIZED_PNL = 0.0
 SMOOTHING = 1.0
 
 # فیلتر منفی بودن موجودی اخیر همه معاملات؛ اگر روشن باشد والت‌هایی که مقدار فعلی همه معاملاتشان منفی است حذف می‌شوند.
-FILTER_ALL_RECENT_BALANCES_NEGATIVE = True
+FILTER_ALL_RECENT_BALANCES_NEGATIVE = False
 
 # فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
-FILTER_NEGATIVE_NET_EDGE = True
+FILTER_NEGATIVE_NET_EDGE = False
 
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
 FILTER_MIN_RECOVERY_FACTOR = False
@@ -175,7 +182,7 @@ FILTER_MIN_RECOVERY_FACTOR = False
 MIN_RECOVERY_FACTOR = 5
 
 # فیلتر فعالیت ۷ روز اخیر؛ اگر روشن باشد والت بدون معامله باز/بسته‌شده در ۷ روز اخیر حذف می‌شود.
-FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
+FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = False
 
 # تعداد روز برای فیلتر فعالیت اخیر.
 RECENT_ACTIVITY_DAYS = 15
@@ -193,7 +200,7 @@ SHORT_HOLD_MAX_HOURS = 24.0
 PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS = False
 
 # حذف همزمان والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
-PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = True
+PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = False
 
 # آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
 UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = False
@@ -482,6 +489,66 @@ def load_wallet_universe(path: Path) -> dict[str, WalletSeed]:
                 best_rank_seen=int(safe_float(row.get("bestRankSeen"), 10**9)),
                 modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else set(),
             )
+    return wallets
+
+
+def xlsx_cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    if cell_type == "inlineStr":
+        return "".join(cell.itertext())
+    value = cell.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+    if value is None or value.text is None:
+        return ""
+    if cell_type == "s":
+        index = int(safe_float(value.text, -1))
+        return shared_strings[index] if 0 <= index < len(shared_strings) else ""
+    return value.text
+
+
+def load_xlsx_shared_strings(xlsx: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in xlsx.namelist():
+        return []
+    root = ET.fromstring(xlsx.read("xl/sharedStrings.xml"))
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    return ["".join(item.itertext()) for item in root.findall(f"{namespace}si")]
+
+
+def load_xlsx_rows(path: Path) -> list[dict[str, str]]:
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(path, "r") as xlsx:
+        shared_strings = load_xlsx_shared_strings(xlsx)
+        root = ET.fromstring(xlsx.read("xl/worksheets/sheet1.xml"))
+    sheet_rows = root.findall(f".//{namespace}row")
+    if not sheet_rows:
+        return []
+    header = [xlsx_cell_text(cell, shared_strings) for cell in sheet_rows[0].findall(f"{namespace}c")]
+    rows: list[dict[str, str]] = []
+    for sheet_row in sheet_rows[1:]:
+        cells = [xlsx_cell_text(cell, shared_strings) for cell in sheet_row.findall(f"{namespace}c")]
+        row = {field: cells[index] if index < len(cells) else "" for index, field in enumerate(header)}
+        if row.get("proxyWallet"):
+            rows.append(row)
+    return rows
+
+
+def load_wallets_from_score_xlsx(path: Path) -> dict[str, WalletSeed]:
+    wallets: dict[str, WalletSeed] = {}
+    for row in load_xlsx_rows(path):
+        wallet = str(row.get("proxyWallet") or "").lower()
+        if not wallet:
+            continue
+        wallets[wallet] = WalletSeed(
+            proxy_wallet=wallet,
+            user_name=row.get("userName", ""),
+            x_username=row.get("xUsername", ""),
+            verified_badge=str(row.get("verifiedBadge", "")).lower() in ("1", "true"),
+            best_pnl=safe_float(row.get("realizedPnlAfterCosts") or row.get("realizedPnlClosed")),
+            best_vol=safe_float(row.get("totalBoughtAfterCosts") or row.get("totalBoughtClosed")),
+            profile_views=int(safe_float(row.get("profileViews"))),
+            leaderboard_hits=int(safe_float(row.get("leaderboardHits"), 1)),
+            best_rank_seen=int(safe_float(row.get("rank"), 10**9)),
+            modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else {"oneShareNetPnlAfterCosts"},
+        )
     return wallets
 
 
@@ -874,6 +941,7 @@ def rank_wallets(
     smoothing: float,
     max_wallets: int | None,
     max_positions_per_wallet: int,
+    preserve_wallet_order: bool = False,
 ) -> None:
     raw_path = out_dir / RAW_CLOSED_POSITIONS_LOG_FILE_NAME
     fail_path = out_dir / "closed_positions_failed.csv"
@@ -885,7 +953,11 @@ def rank_wallets(
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
 
-    ranked_wallets = sorted(wallets.values(), key=lambda item: item.best_pnl, reverse=True)
+    ranked_wallets = (
+        list(wallets.values())
+        if preserve_wallet_order
+        else sorted(wallets.values(), key=lambda item: item.best_pnl, reverse=True)
+    )
     if max_wallets:
         ranked_wallets = ranked_wallets[:max_wallets]
 
@@ -1721,6 +1793,11 @@ def print_active_settings(
             f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET} "
             f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET}"
         )
+        print(
+            "[mode 2 input] "
+            f"use_one_share_ranking_input={USE_ONE_SHARE_RANKING_INPUT} "
+            f"file={ONE_SHARE_RANKING_INPUT_FILE_NAME}"
+        )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[not saved reasons] {NOT_SAVED_REASONS_FILE_NAME} shows why wallets did not enter score files")
         print(f"[not saved reason stats] {NOT_SAVED_REASON_STATS_FILE_NAME} counts repeated removal reasons")
@@ -1764,11 +1841,24 @@ def main() -> int:
     client = PolymarketClient(delay=delay, timeout=timeout, retries=retries)
 
     universe_path = out_dir / "wallet_universe.csv"
+    one_share_input_path = out_dir / ONE_SHARE_RANKING_INPUT_FILE_NAME
+    preserve_wallet_order = False
     if mode == 2:
-        if not universe_path.exists():
-            print(f"Missing {universe_path}. Run mode 1 first.", file=sys.stderr)
-            return 2
-        wallets = load_wallet_universe(universe_path)
+        if USE_ONE_SHARE_RANKING_INPUT:
+            if not one_share_input_path.exists():
+                print(
+                    f"Missing {one_share_input_path}. Rename edge_scores_by_oneShareNetPnlAfterCosts.xlsx "
+                    f"to {ONE_SHARE_RANKING_INPUT_FILE_NAME} or set USE_ONE_SHARE_RANKING_INPUT = False.",
+                    file=sys.stderr,
+                )
+                return 2
+            wallets = load_wallets_from_score_xlsx(one_share_input_path)
+            preserve_wallet_order = True
+        else:
+            if not universe_path.exists():
+                print(f"Missing {universe_path}. Run mode 1 first.", file=sys.stderr)
+                return 2
+            wallets = load_wallet_universe(universe_path)
     else:
         wallets = collect_leaderboard_universe(
             client=client,
@@ -1791,6 +1881,7 @@ def main() -> int:
         smoothing=smoothing,
         max_wallets=max_wallets,
         max_positions_per_wallet=max_positions_per_wallet,
+        preserve_wallet_order=preserve_wallet_order,
     )
     print(f"[done] results: {out_dir / 'edge_scores.xlsx'}", flush=True)
     return 0
