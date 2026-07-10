@@ -169,7 +169,7 @@ FILTER_ALL_RECENT_BALANCES_NEGATIVE = True
 FILTER_NEGATIVE_NET_EDGE = True
 
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
-FILTER_MIN_RECOVERY_FACTOR = True
+FILTER_MIN_RECOVERY_FACTOR = False
 
 # حداقل Recovery Factor قابل قبول وقتی فیلتر بالا روشن باشد.
 MIN_RECOVERY_FACTOR = 5
@@ -178,10 +178,10 @@ MIN_RECOVERY_FACTOR = 5
 FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
 
 # تعداد روز برای فیلتر فعالیت اخیر.
-RECENT_ACTIVITY_DAYS = 7
+RECENT_ACTIVITY_DAYS = 15
 
 # فیلتر معاملات کوتاه‌مدت؛ اگر روشن باشد والت‌هایی که درصد زیادی معامله زیر زمان مشخص دارند حذف می‌شوند.
-FILTER_SHORT_HOLD_RATIO = True
+FILTER_SHORT_HOLD_RATIO = False
 
 # حداکثر درصد معاملات کوتاه‌مدت مجاز؛ 0.25 یعنی ۲۵ درصد.
 MAX_SHORT_HOLD_RATIO = 0.25
@@ -193,10 +193,13 @@ SHORT_HOLD_MAX_HOURS = 24.0
 PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS = False
 
 # حذف همزمان والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
-PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = False
+PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = True
 
 # آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
-UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = True
+UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = False
+
+# آپدیت edge_scores_progress.csv بعد از اسکن هر والت؛ خروجی زنده CSV می‌دهد ولی روی دیتای زیاد کندتر است.
+UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET = False
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -943,7 +946,8 @@ def rank_wallets(
                 **score,
             }
             score_by_wallet[seed.proxy_wallet] = score_row
-            write_sorted_scores_csv(score_by_wallet.values(), progress_path, score_fieldnames)
+            if UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET:
+                write_sorted_scores_csv(score_by_wallet.values(), progress_path, score_fieldnames)
             write_test_memory_row(
                 memory_writer,
                 memory_file,
@@ -954,6 +958,8 @@ def rank_wallets(
             tested_wallets.add(seed.proxy_wallet)
             write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
 
+    if not UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET:
+        write_sorted_scores_csv(score_by_wallet.values(), progress_path, score_fieldnames)
     write_all_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
     if PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS:
         rewrite_closed_positions_cache(raw_path, cached_positions)
@@ -1521,7 +1527,8 @@ def print_active_settings(
             f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
             f"purge_position_jsonl={PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS} "
             f"purge_wallet_universe={PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE} "
-            f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET}"
+            f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET} "
+            f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET}"
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[not saved reasons] {NOT_SAVED_REASONS_FILE_NAME} shows why wallets did not enter score files")
