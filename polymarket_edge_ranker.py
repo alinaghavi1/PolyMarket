@@ -151,7 +151,7 @@ MIN_RESOLVED_POSITIONS = 1
 
 # حداقل تعداد باخت لازم.
 # این کمک می‌کند والت‌هایی که فقط چند برد و تقریباً بدون باخت دارند الکی امتیاز نگیرند.
-MIN_LOSING_POSITIONS = 0
+MIN_LOSING_POSITIONS = 1
 
 # حداقل سود بسته‌شده.
 # اگر 0 باشد، فقط والت‌هایی وارد خروجی می‌شوند که سودشان منفی نیست.
@@ -629,10 +629,10 @@ def polymarket_fee(shares: float, fee_rate: float, price: float) -> float:
     return shares * fee_rate * price * (1.0 - price)
 
 
-def adjusted_position_costs(pos: dict[str, Any]) -> dict[str, float]:
+def adjusted_position_costs(pos: dict[str, Any], shares_override: float | None = None) -> dict[str, float]:
     wallet_entry_price = min(max(safe_float(pos.get("avgPrice")), 0.0), 1.0)
     entry_price = copy_entry_price(wallet_entry_price)
-    shares = estimate_shares(pos, wallet_entry_price)
+    shares = shares_override if shares_override is not None else estimate_shares(pos, wallet_entry_price)
     fee_rate = fee_rate_for_position(pos)
     entry_fee = polymarket_fee(shares, fee_rate, entry_price)
     exit_fee = 0.0
@@ -675,6 +675,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     realized_pnl = 0.0
     realized_pnl_after_costs = 0.0
     total_bought = 0.0
+    total_bought_after_costs = 0.0
+    one_share_net_pnl_after_costs = 0.0
     gross_profit = 0.0
     gross_loss = 0.0
     gross_profit_after_costs = 0.0
@@ -704,13 +706,14 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     short_hold_seconds = SHORT_HOLD_MAX_HOURS * 60 * 60
 
     for pos in positions:
-        avg_price = min(max(safe_float(pos.get("avgPrice")), 0.0), 1.0)
         pnl = safe_float(pos.get("realizedPnl"))
         costs = adjusted_position_costs(pos)
+        one_share_costs = adjusted_position_costs(pos, shares_override=1.0)
         net_pnl = costs["netPnlAfterFeesAndSpread"]
         bought = safe_float(pos.get("totalBought"))
         realized_pnl += pnl
         realized_pnl_after_costs += net_pnl
+        one_share_net_pnl_after_costs += one_share_costs["netPnlAfterFeesAndSpread"]
         total_entry_fees += costs["entryFee"]
         total_exit_fees += costs["exitFee"]
         total_assumed_spread_cost += costs["shares"] * max(costs["copyEntryPrice"] - costs["walletEntryPrice"], 0.0)
@@ -719,6 +722,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         sum_fee_rate += costs["feeRate"]
         costed_positions += 1
         total_bought += bought
+        total_bought_after_costs += costs["shares"] * costs["copyEntryPrice"] + costs["entryFee"]
         pnl_series.append(net_pnl)
         equity += net_pnl
         peak_equity = max(peak_equity, equity)
@@ -741,7 +745,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
 
         if pnl > 0:
             wins += 1
-            sum_resolved_entry_price += avg_price
+            sum_resolved_entry_price += costs["copyEntryPrice"]
             current_consecutive_wins += 1
             current_consecutive_losses = 0
             max_consecutive_wins = max(max_consecutive_wins, current_consecutive_wins)
@@ -750,7 +754,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
             sum_win_edge_sq += edge * edge
         elif pnl < 0:
             losses += 1
-            sum_resolved_entry_price += avg_price
+            sum_resolved_entry_price += costs["copyEntryPrice"]
             current_consecutive_losses += 1
             current_consecutive_wins = 0
             max_consecutive_losses = max(max_consecutive_losses, current_consecutive_losses)
@@ -779,7 +783,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
     adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
     roi_closed = realized_pnl / total_bought if total_bought > 0 else 0.0
-    roi_after_costs = realized_pnl_after_costs / total_bought if total_bought > 0 else 0.0
+    roi_after_costs = (
+        realized_pnl_after_costs / total_bought_after_costs if total_bought_after_costs > 0 else 0.0
+    )
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
     profit_factor_after_costs = (
         gross_profit_after_costs / gross_loss_after_costs if gross_loss_after_costs > 0 else 0.0
@@ -818,7 +824,10 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "realizedPnlClosed": realized_pnl_after_costs,
         "realizedPnlClosedRaw": realized_pnl,
         "realizedPnlAfterCosts": realized_pnl_after_costs,
-        "totalBoughtClosed": total_bought,
+        "totalBoughtClosed": total_bought_after_costs,
+        "totalBoughtClosedRaw": total_bought,
+        "totalBoughtAfterCosts": total_bought_after_costs,
+        "oneShareNetPnlAfterCosts": one_share_net_pnl_after_costs,
         "roiClosed": roi_after_costs,
         "roiRaw": roi_closed,
         "roiAfterCosts": roi_after_costs,
@@ -834,8 +843,10 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "expectedPayoffAfterCosts": expected_payoff,
         "maxConsecutiveWins": max_consecutive_wins,
         "maxConsecutiveLosses": max_consecutive_losses,
-        "grossProfit": gross_profit,
-        "grossLoss": gross_loss,
+        "grossProfit": gross_profit_after_costs,
+        "grossLoss": gross_loss_after_costs,
+        "grossProfitRaw": gross_profit,
+        "grossLossRaw": gross_loss,
         "grossProfitAfterCosts": gross_profit_after_costs,
         "grossLossAfterCosts": gross_loss_after_costs,
         "walletEntryPrice": sum_wallet_entry_price / costed_positions if costed_positions else 0.0,
@@ -1285,6 +1296,7 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "realizedPnlClosed",
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
+        "oneShareNetPnlAfterCosts",
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
@@ -1352,6 +1364,7 @@ def write_not_saved_reason(
         "realizedPnlClosed": score.get("realizedPnlClosed", ""),
         "realizedPnlClosedRaw": score.get("realizedPnlClosedRaw", ""),
         "realizedPnlAfterCosts": score.get("realizedPnlAfterCosts", ""),
+        "oneShareNetPnlAfterCosts": score.get("oneShareNetPnlAfterCosts", ""),
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
@@ -1436,6 +1449,7 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("adjustedWinRate", True),
         ("winRate", True),
         ("realizedPnlAfterCosts", True),
+        ("oneShareNetPnlAfterCosts", True),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
         ("profitFactorAfterCosts", True),
@@ -1564,6 +1578,9 @@ def get_score_fieldnames() -> list[str]:
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
         "totalBoughtClosed",
+        "totalBoughtClosedRaw",
+        "totalBoughtAfterCosts",
+        "oneShareNetPnlAfterCosts",
         "roiClosed",
         "roiRaw",
         "roiAfterCosts",
@@ -1581,6 +1598,8 @@ def get_score_fieldnames() -> list[str]:
         "maxConsecutiveLosses",
         "grossProfit",
         "grossLoss",
+        "grossProfitRaw",
+        "grossLossRaw",
         "grossProfitAfterCosts",
         "grossLossAfterCosts",
         "walletEntryPrice",
