@@ -165,8 +165,8 @@ MIN_LOSING_POSITIONS = 1
 # برای تست آزاد می‌توانی عدد منفی خیلی بزرگ بگذاری.
 MIN_CLOSED_REALIZED_PNL = 0.0
 
-# smoothing مخرج فرمول Edge Rally.
-# مقدار 1 از تقسیم بر صفر جلوگیری می‌کند و جلوی امتیازهای مصنوعی خیلی بزرگ را می‌گیرد.
+# مخرج پیش‌فرض فرمول Edge Rally فقط وقتی هیچ ضرری وجود ندارد.
+# وقتی ضرر وجود دارد، مخرج همان sumLossRiskSq است و smoothing اضافه نمی‌شود.
 SMOOTHING = 1.0
 
 # فیلتر منفی بودن موجودی اخیر همه معاملات؛ اگر روشن باشد والت‌هایی که مقدار فعلی همه معاملاتشان منفی است حذف می‌شوند.
@@ -843,7 +843,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
 
     resolved = wins + losses
     net_edge = sum_win_edge - sum_loss_risk
-    edge_rally_raw = sum_win_edge_sq / (sum_loss_risk_sq + smoothing)
+    edge_rally_denominator = sum_loss_risk_sq if losses > 0 and sum_loss_risk_sq > 0 else smoothing
+    edge_rally_raw = sum_win_edge_sq / edge_rally_denominator
     rally_times_net_edge = edge_rally_raw * net_edge
     rally_times_one_share_net_pnl = edge_rally_raw * one_share_net_pnl_after_costs
     edge_rally = rally_times_net_edge
@@ -886,6 +887,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "sumLossRisk": sum_loss_risk,
         "sumWinEdgeSq": sum_win_edge_sq,
         "sumLossRiskSq": sum_loss_risk_sq,
+        "edgeRallyDenominator": edge_rally_denominator,
         "netEdge": net_edge,
         "netEdgeScore": net_edge_score,
         "edgeRallyRaw": edge_rally_raw,
@@ -1652,6 +1654,7 @@ def get_score_fieldnames() -> list[str]:
         "sumLossRisk",
         "sumWinEdgeSq",
         "sumLossRiskSq",
+        "edgeRallyDenominator",
         "realizedPnlClosed",
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
