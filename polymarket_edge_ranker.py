@@ -844,8 +844,10 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     resolved = wins + losses
     net_edge = sum_win_edge - sum_loss_risk
     edge_rally_raw = sum_win_edge_sq / (sum_loss_risk_sq + smoothing)
-    edge_rally = edge_rally_raw * net_edge
-    net_edge_score = edge_rally
+    rally_times_net_edge = edge_rally_raw * net_edge
+    rally_times_one_share_net_pnl = edge_rally_raw * one_share_net_pnl_after_costs
+    edge_rally = rally_times_net_edge
+    net_edge_score = rally_times_net_edge
     win_rate = wins / resolved if resolved else 0.0
     avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
     adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
@@ -888,6 +890,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "netEdgeScore": net_edge_score,
         "edgeRallyRaw": edge_rally_raw,
         "edgeRally": edge_rally,
+        "rallyTimesNetEdge": rally_times_net_edge,
+        "rallyTimesOneShareNetPnlAfterCosts": rally_times_one_share_net_pnl,
         "realizedPnlClosed": realized_pnl_after_costs,
         "realizedPnlClosedRaw": realized_pnl,
         "realizedPnlAfterCosts": realized_pnl_after_costs,
@@ -1518,6 +1522,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
     factors = [
         ("netEdge", True),
         ("netEdgeScore", True),
+        ("rallyTimesNetEdge", True),
+        ("rallyTimesOneShareNetPnlAfterCosts", True),
         ("adjustedWinRate", True),
         ("winRate", True),
         ("realizedPnlAfterCosts", True),
@@ -1688,6 +1694,8 @@ def get_score_fieldnames() -> list[str]:
         "allRecentBalancesNegative",
         "edgeRally",
         "edgeRallyRaw",
+        "rallyTimesNetEdge",
+        "rallyTimesOneShareNetPnlAfterCosts",
         "bestPnlLeaderboard",
         "bestVolLeaderboard",
         "profileViews",
