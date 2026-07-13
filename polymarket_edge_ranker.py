@@ -831,6 +831,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     total_bought = 0.0
     total_bought_after_costs = 0.0
     one_share_net_pnl_after_costs = 0.0
+    one_share_total_cost_after_costs = 0.0
     gross_profit = 0.0
     gross_loss = 0.0
     gross_profit_after_costs = 0.0
@@ -871,6 +872,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         realized_pnl += pnl
         realized_pnl_after_costs += net_pnl
         one_share_net_pnl_after_costs += one_share_costs["netPnlAfterFeesAndSpread"]
+        one_share_total_cost_after_costs += one_share_costs["copyEntryPrice"] + one_share_costs["entryFee"]
         total_entry_fees += costs["entryFee"]
         total_exit_fees += costs["exitFee"]
         total_assumed_spread_cost += costs["shares"] * max(costs["copyEntryPrice"] - costs["walletEntryPrice"], 0.0)
@@ -960,6 +962,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     trading_days = len(trades_by_day)
     average_trades_per_day = len(positions) / trading_days if trading_days else 0.0
     max_trades_in_one_day = max(trades_by_day.values()) if trades_by_day else 0
+    one_share_average_daily_cost_after_costs = (
+        one_share_total_cost_after_costs / trading_days if trading_days else 0.0
+    )
     if len(pnl_series) > 1:
         mean_pnl = sum(pnl_series) / len(pnl_series)
         variance = sum((pnl - mean_pnl) ** 2 for pnl in pnl_series) / (len(pnl_series) - 1)
@@ -994,6 +999,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "totalBoughtClosedRaw": total_bought,
         "totalBoughtAfterCosts": total_bought_after_costs,
         "oneShareNetPnlAfterCosts": one_share_net_pnl_after_costs,
+        "oneShareTotalCostAfterCosts": one_share_total_cost_after_costs,
+        "oneShareAverageDailyCostAfterCosts": one_share_average_daily_cost_after_costs,
         "roiClosed": roi_after_costs,
         "roiRaw": roi_closed,
         "roiAfterCosts": roi_after_costs,
@@ -1472,6 +1479,8 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareTotalCostAfterCosts",
+        "oneShareAverageDailyCostAfterCosts",
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
@@ -1543,6 +1552,8 @@ def write_not_saved_reason(
         "realizedPnlClosedRaw": score.get("realizedPnlClosedRaw", ""),
         "realizedPnlAfterCosts": score.get("realizedPnlAfterCosts", ""),
         "oneShareNetPnlAfterCosts": score.get("oneShareNetPnlAfterCosts", ""),
+        "oneShareTotalCostAfterCosts": score.get("oneShareTotalCostAfterCosts", ""),
+        "oneShareAverageDailyCostAfterCosts": score.get("oneShareAverageDailyCostAfterCosts", ""),
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
@@ -1633,6 +1644,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("winRate", True),
         ("realizedPnlAfterCosts", True),
         ("oneShareNetPnlAfterCosts", True),
+        ("oneShareTotalCostAfterCosts", False),
+        ("oneShareAverageDailyCostAfterCosts", False),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
         ("profitFactorAfterCosts", True),
@@ -1767,6 +1780,8 @@ def get_score_fieldnames() -> list[str]:
         "totalBoughtClosedRaw",
         "totalBoughtAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareTotalCostAfterCosts",
+        "oneShareAverageDailyCostAfterCosts",
         "roiClosed",
         "roiRaw",
         "roiAfterCosts",
