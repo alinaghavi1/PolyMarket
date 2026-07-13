@@ -142,11 +142,6 @@ MAX_LEADERBOARD_OFFSET = 1000
 # API رسمی معمولاً حداکثر 50 می‌دهد؛ بهتر است تغییرش ندهی.
 LEADERBOARD_LIMIT = 50
 
-# فیلتر مود 1 برای ثبت نکردن والت‌های خیلی شلوغ در wallet_universe.csv.
-# اگر API لیدربورد تعداد معامله/پوزیشن والت را بدهد و از حد زیر بیشتر باشد، والت کلاً ذخیره نمی‌شود.
-FILTER_MODE_1_MAX_TRADES = True
-MODE_1_MAX_TRADES_PER_WALLET = 2000
-
 # حداکثر چند والت از wallet_universe.csv تست شود.
 # برای تست سریع عدد کم بگذار، مثلاً 100.
 # برای تست همه والت‌ها بگذار None.
@@ -244,10 +239,6 @@ def safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def safe_int(value: Any, default: int = 0) -> int:
-    return int(safe_float(value, default))
-
-
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -303,23 +294,6 @@ class PolymarketClient:
         raise RuntimeError(f"Request failed after retries: {url}: {last_error}")
 
 
-def leaderboard_trade_count(row: dict[str, Any]) -> int:
-    for key in (
-        "positions",
-        "positionCount",
-        "positionsCount",
-        "tradeCount",
-        "trades",
-        "totalTrades",
-        "closedPositions",
-        "closedPositionCount",
-        "marketsTraded",
-    ):
-        if key in row and row.get(key) not in (None, ""):
-            return safe_int(row.get(key))
-    return 0
-
-
 @dataclass
 class WalletSeed:
     proxy_wallet: str
@@ -331,7 +305,6 @@ class WalletSeed:
     profile_views: int = 0
     leaderboard_hits: int = 0
     best_rank_seen: int = 10**9
-    max_trade_count_seen: int = 0
     modes: set[str] = field(default_factory=set)
 
     def update(self, row: dict[str, Any], mode: str) -> None:
@@ -352,7 +325,6 @@ class WalletSeed:
             ),
         )
         self.leaderboard_hits += 1
-        self.max_trade_count_seen = max(self.max_trade_count_seen, leaderboard_trade_count(row))
         self.modes.add(mode)
         try:
             rank = int(str(row.get("rank") or "999999").replace(",", ""))
@@ -369,8 +341,6 @@ def collect_leaderboard_universe(
 ) -> dict[str, WalletSeed]:
     raw_path = out_dir / "leaderboard_raw.jsonl"
     fail_path = out_dir / "leaderboard_failed.csv"
-    skipped_path = out_dir / "leaderboard_skipped_wallets.csv"
-    skipped_wallets: set[str] = set()
     wallets, done_offsets = load_leaderboard_cache(raw_path)
     if wallets:
         print(f"[resume] loaded {len(wallets)} wallets from existing leaderboard cache", flush=True)
@@ -378,10 +348,7 @@ def collect_leaderboard_universe(
     fail_file, fail_writer = open_csv_append(
         fail_path, ["category", "timePeriod", "orderBy", "offset", "error"]
     )
-    skipped_file, skipped_writer = open_csv_append(
-        skipped_path, ["proxyWallet", "userName", "tradeCount", "maxAllowedTrades", "mode", "reason"]
-    )
-    with raw_path.open("a", encoding="utf-8") as raw_file, fail_file, skipped_file:
+    with raw_path.open("a", encoding="utf-8") as raw_file, fail_file:
         for category in CATEGORIES:
             for period in TIME_PERIODS:
                 for order_by in ORDER_BY:
@@ -422,27 +389,6 @@ def collect_leaderboard_universe(
                             wallet = str(row.get("proxyWallet") or "").lower()
                             if not wallet:
                                 continue
-                            if wallet in skipped_wallets:
-                                continue
-                            trade_count = leaderboard_trade_count(row)
-                            if (
-                                FILTER_MODE_1_MAX_TRADES
-                                and trade_count > MODE_1_MAX_TRADES_PER_WALLET
-                            ):
-                                wallets.pop(wallet, None)
-                                skipped_wallets.add(wallet)
-                                skipped_writer.writerow(
-                                    {
-                                        "proxyWallet": wallet,
-                                        "userName": str(row.get("userName") or ""),
-                                        "tradeCount": trade_count,
-                                        "maxAllowedTrades": MODE_1_MAX_TRADES_PER_WALLET,
-                                        "mode": mode,
-                                        "reason": "mode 1 max trades filter",
-                                    }
-                                )
-                                skipped_file.flush()
-                                continue
                             if wallet not in wallets:
                                 wallets[wallet] = WalletSeed(proxy_wallet=wallet)
                             wallets[wallet].update(row, mode)
@@ -457,7 +403,6 @@ def collect_leaderboard_universe(
 
 def load_leaderboard_cache(raw_path: Path) -> tuple[dict[str, WalletSeed], set[tuple[str, int]]]:
     wallets: dict[str, WalletSeed] = {}
-    skipped_wallets: set[str] = set()
     done_offsets: set[tuple[str, int]] = set()
     if not raw_path.exists():
         return wallets, done_offsets
@@ -477,13 +422,6 @@ def load_leaderboard_cache(raw_path: Path) -> tuple[dict[str, WalletSeed], set[t
                 done_offsets.add((mode, offset))
             wallet = str(row.get("proxyWallet") or "").lower()
             if not wallet:
-                continue
-            if wallet in skipped_wallets:
-                continue
-            trade_count = leaderboard_trade_count(row)
-            if FILTER_MODE_1_MAX_TRADES and trade_count > MODE_1_MAX_TRADES_PER_WALLET:
-                wallets.pop(wallet, None)
-                skipped_wallets.add(wallet)
                 continue
             if wallet not in wallets:
                 wallets[wallet] = WalletSeed(proxy_wallet=wallet)
@@ -506,7 +444,6 @@ def write_wallet_universe_csv(wallets: dict[str, WalletSeed], path: Path) -> Non
                 "roiProxy",
                 "leaderboardHits",
                 "bestRankSeen",
-                "maxTradeCountSeen",
                 "modes",
             ],
         )
@@ -529,7 +466,6 @@ def write_wallet_universe_csv(wallets: dict[str, WalletSeed], path: Path) -> Non
                     "roiProxy": roi_proxy,
                     "leaderboardHits": wallet.leaderboard_hits,
                     "bestRankSeen": wallet.best_rank_seen,
-                    "maxTradeCountSeen": wallet.max_trade_count_seen,
                     "modes": "|".join(sorted(wallet.modes)),
                 }
             )
@@ -551,7 +487,6 @@ def load_wallet_universe(path: Path) -> dict[str, WalletSeed]:
                 profile_views=int(safe_float(row.get("profileViews"))),
                 leaderboard_hits=int(safe_float(row.get("leaderboardHits"))),
                 best_rank_seen=int(safe_float(row.get("bestRankSeen"), 10**9)),
-                max_trade_count_seen=int(safe_float(row.get("maxTradeCountSeen"))),
                 modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else set(),
             )
     return wallets
@@ -612,7 +547,6 @@ def load_wallets_from_score_xlsx(path: Path) -> dict[str, WalletSeed]:
             profile_views=int(safe_float(row.get("profileViews"))),
             leaderboard_hits=int(safe_float(row.get("leaderboardHits"), 1)),
             best_rank_seen=int(safe_float(row.get("rank"), 10**9)),
-            max_trade_count_seen=int(safe_float(row.get("positions") or row.get("maxTradeCountSeen"))),
             modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else {"oneShareNetPnlAfterCosts"},
         )
     return wallets
@@ -962,6 +896,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     trading_days = len(trades_by_day)
     average_trades_per_day = len(positions) / trading_days if trading_days else 0.0
     max_trades_in_one_day = max(trades_by_day.values()) if trades_by_day else 0
+    profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
+    profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
     one_share_average_daily_cost_after_costs = (
         one_share_total_cost_after_costs / trading_days if trading_days else 0.0
     )
@@ -1014,6 +950,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "sharpeRatio": sharpe_ratio,
         "expectedPayoff": expected_payoff,
         "expectedPayoffAfterCosts": expected_payoff,
+        "profitPerTradeAfterCosts": profit_per_trade_after_costs,
+        "profitPerTradeTimesWinRateAfterCosts": profit_per_trade_times_win_rate_after_costs,
         "maxConsecutiveWins": max_consecutive_wins,
         "maxConsecutiveLosses": max_consecutive_losses,
         "grossProfit": gross_profit_after_costs,
@@ -1285,7 +1223,6 @@ def rank_wallets(
                 "roiProxyLeaderboard": roi_proxy,
                 "leaderboardHits": seed.leaderboard_hits,
                 "bestRankSeen": seed.best_rank_seen,
-                "maxTradeCountSeen": seed.max_trade_count_seen,
                 "modes": "|".join(sorted(seed.modes)),
                 **score,
             }
@@ -1481,6 +1418,8 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "oneShareNetPnlAfterCosts",
         "oneShareTotalCostAfterCosts",
         "oneShareAverageDailyCostAfterCosts",
+        "profitPerTradeAfterCosts",
+        "profitPerTradeTimesWinRateAfterCosts",
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
@@ -1554,6 +1493,8 @@ def write_not_saved_reason(
         "oneShareNetPnlAfterCosts": score.get("oneShareNetPnlAfterCosts", ""),
         "oneShareTotalCostAfterCosts": score.get("oneShareTotalCostAfterCosts", ""),
         "oneShareAverageDailyCostAfterCosts": score.get("oneShareAverageDailyCostAfterCosts", ""),
+        "profitPerTradeAfterCosts": score.get("profitPerTradeAfterCosts", ""),
+        "profitPerTradeTimesWinRateAfterCosts": score.get("profitPerTradeTimesWinRateAfterCosts", ""),
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
@@ -1646,6 +1587,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("oneShareNetPnlAfterCosts", True),
         ("oneShareTotalCostAfterCosts", False),
         ("oneShareAverageDailyCostAfterCosts", False),
+        ("profitPerTradeAfterCosts", True),
+        ("profitPerTradeTimesWinRateAfterCosts", True),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
         ("profitFactorAfterCosts", True),
@@ -1782,6 +1725,8 @@ def get_score_fieldnames() -> list[str]:
         "oneShareNetPnlAfterCosts",
         "oneShareTotalCostAfterCosts",
         "oneShareAverageDailyCostAfterCosts",
+        "profitPerTradeAfterCosts",
+        "profitPerTradeTimesWinRateAfterCosts",
         "roiClosed",
         "roiRaw",
         "roiAfterCosts",
@@ -1828,7 +1773,6 @@ def get_score_fieldnames() -> list[str]:
         "roiProxyLeaderboard",
         "leaderboardHits",
         "bestRankSeen",
-        "maxTradeCountSeen",
         "modes",
     ]
 
@@ -1906,10 +1850,6 @@ def print_active_settings(
         print(
             f"[extract settings] max_offset={max_offset} "
             f"limit={LEADERBOARD_LIMIT} modes={len(CATEGORIES) * len(TIME_PERIODS) * len(ORDER_BY)}"
-        )
-        print(
-            "[mode 1 filters] "
-            f"max_trades={FILTER_MODE_1_MAX_TRADES}:{MODE_1_MAX_TRADES_PER_WALLET}"
         )
     else:
         max_wallets_text = "ALL" if max_wallets is None else str(max_wallets)
