@@ -638,8 +638,8 @@ def first_timestamp(pos: dict[str, Any], keys: list[str]) -> float | None:
     return None
 
 
-def trade_day_key(pos: dict[str, Any]) -> str:
-    timestamp = first_timestamp(
+def trade_timestamp(pos: dict[str, Any]) -> float | None:
+    return first_timestamp(
         pos,
         [
             "timestamp",
@@ -654,6 +654,10 @@ def trade_day_key(pos: dict[str, Any]) -> str:
             "created",
         ],
     )
+
+
+def trade_day_key(pos: dict[str, Any]) -> str:
+    timestamp = trade_timestamp(pos)
     if timestamp is None:
         return "unknown"
     return datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
@@ -791,11 +795,21 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     short_hold_count = 0
     hold_duration_count = 0
     trades_by_day: dict[str, int] = {}
+    first_trade_ts: float | None = None
+    last_trade_ts: float | None = None
     now_ts = time.time()
     recent_cutoff = now_ts - RECENT_ACTIVITY_DAYS * 24 * 60 * 60
     short_hold_seconds = SHORT_HOLD_MAX_HOURS * 60 * 60
 
     for pos in positions:
+        position_trade_ts = trade_timestamp(pos)
+        if position_trade_ts is not None:
+            first_trade_ts = (
+                position_trade_ts if first_trade_ts is None else min(first_trade_ts, position_trade_ts)
+            )
+            last_trade_ts = (
+                position_trade_ts if last_trade_ts is None else max(last_trade_ts, position_trade_ts)
+            )
         day_key = trade_day_key(pos)
         trades_by_day[day_key] = trades_by_day.get(day_key, 0) + 1
         pnl = safe_float(pos.get("realizedPnl"))
@@ -896,6 +910,16 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     trading_days = len(trades_by_day)
     average_trades_per_day = len(positions) / trading_days if trading_days else 0.0
     max_trades_in_one_day = max(trades_by_day.values()) if trades_by_day else 0
+    days_since_last_trade = (now_ts - last_trade_ts) / (24 * 60 * 60) if last_trade_ts is not None else 0.0
+    if first_trade_ts is not None and last_trade_ts is not None:
+        first_trade_day = datetime.utcfromtimestamp(first_trade_ts).date()
+        last_trade_day = datetime.utcfromtimestamp(last_trade_ts).date()
+        calendar_trade_span_days = max((last_trade_day - first_trade_day).days + 1, 1)
+    else:
+        calendar_trade_span_days = 0
+    trades_per_calendar_day_first_to_last = (
+        len(positions) / calendar_trade_span_days if calendar_trade_span_days else 0.0
+    )
     profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
     profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
     one_share_average_daily_cost_after_costs = (
@@ -971,6 +995,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "tradingDays": trading_days,
         "averageTradesPerDay": average_trades_per_day,
         "maxTradesInOneDay": max_trades_in_one_day,
+        "daysSinceLastTrade": days_since_last_trade,
+        "tradesPerCalendarDayFirstToLast": trades_per_calendar_day_first_to_last,
         "shortHoldCount": short_hold_count,
         "holdDurationCount": hold_duration_count,
         "shortHoldRatio": short_hold_ratio,
@@ -1426,6 +1452,8 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "tradingDays",
         "averageTradesPerDay",
         "maxTradesInOneDay",
+        "daysSinceLastTrade",
+        "tradesPerCalendarDayFirstToLast",
         "shortHoldRatio",
         "allRecentBalancesNegative",
         "testedAt",
@@ -1501,6 +1529,8 @@ def write_not_saved_reason(
         "tradingDays": score.get("tradingDays", ""),
         "averageTradesPerDay": score.get("averageTradesPerDay", ""),
         "maxTradesInOneDay": score.get("maxTradesInOneDay", ""),
+        "daysSinceLastTrade": score.get("daysSinceLastTrade", ""),
+        "tradesPerCalendarDayFirstToLast": score.get("tradesPerCalendarDayFirstToLast", ""),
         "shortHoldRatio": score.get("shortHoldRatio", ""),
         "allRecentBalancesNegative": score.get("allRecentBalancesNegative", ""),
         "testedAt": int(time.time()),
@@ -1598,6 +1628,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("expectedPayoffAfterCosts", True),
         ("averageTradesPerDay", True),
         ("maxTradesInOneDay", True),
+        ("daysSinceLastTrade", False),
+        ("tradesPerCalendarDayFirstToLast", True),
         ("shortHoldRatio", False),
         ("profileViews", True),
     ]
@@ -1711,6 +1743,10 @@ def get_score_fieldnames() -> list[str]:
         "wins",
         "losses",
         "breakeven",
+        "averageTradesPerDay",
+        "maxTradesInOneDay",
+        "daysSinceLastTrade",
+        "tradesPerCalendarDayFirstToLast",
         "sumWinEdge",
         "sumLossRisk",
         "sumWinEdgeSq",
@@ -1757,8 +1793,6 @@ def get_score_fieldnames() -> list[str]:
         "exitFee",
         "recentActivityCount",
         "tradingDays",
-        "averageTradesPerDay",
-        "maxTradesInOneDay",
         "shortHoldCount",
         "holdDurationCount",
         "shortHoldRatio",
