@@ -96,7 +96,7 @@ CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages.jsonl"
 
 # اگر روشن باشد، مود 2 علاوه بر فایل‌های اصلی بالا، فایل‌های آفلاین دوم را هم می‌خواند.
 # فقط والت/صفحه‌هایی که داخل فایل‌های اصلی نبودند از این دو فایل fallback برداشته می‌شوند.
-USE_SECONDARY_OFFLINE_POSITION_BACKUPS = False
+USE_SECONDARY_OFFLINE_POSITION_BACKUPS = True
 SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw2.jsonl"
 SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages2.jsonl"
 
@@ -181,7 +181,7 @@ SMOOTHING = 1.0
 FILTER_ALL_RECENT_BALANCES_NEGATIVE = False
 
 # فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
-FILTER_NEGATIVE_NET_EDGE = False
+FILTER_NEGATIVE_NET_EDGE = True
 
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
 FILTER_MIN_RECOVERY_FACTOR = False
@@ -190,10 +190,10 @@ FILTER_MIN_RECOVERY_FACTOR = False
 MIN_RECOVERY_FACTOR = 5
 
 # فیلتر فعالیت ۷ روز اخیر؛ اگر روشن باشد والت بدون معامله باز/بسته‌شده در ۷ روز اخیر حذف می‌شود.
-FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = False
+FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
 
 # تعداد روز برای فیلتر فعالیت اخیر.
-RECENT_ACTIVITY_DAYS = 15
+RECENT_ACTIVITY_DAYS = 25
 
 # فیلتر معاملات کوتاه‌مدت؛ اگر روشن باشد والت‌هایی که درصد زیادی معامله زیر زمان مشخص دارند حذف می‌شوند.
 FILTER_SHORT_HOLD_RATIO = False
@@ -931,6 +931,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
     profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
     profit_per_trade_times_net_edge_after_costs = profit_per_trade_after_costs * net_edge
+    profit_per_trade_times_one_share_net_pnl_after_costs = (
+        profit_per_trade_after_costs * one_share_net_pnl_after_costs
+    )
     rally_times_net_edge_times_profit_per_trade_after_costs = (
         rally_times_net_edge * profit_per_trade_after_costs
     )
@@ -989,6 +992,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "profitPerTradeAfterCosts": profit_per_trade_after_costs,
         "profitPerTradeTimesWinRateAfterCosts": profit_per_trade_times_win_rate_after_costs,
         "profitPerTradeTimesNetEdgeAfterCosts": profit_per_trade_times_net_edge_after_costs,
+        "profitPerTradeTimesOneShareNetPnlAfterCosts": (
+            profit_per_trade_times_one_share_net_pnl_after_costs
+        ),
         "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": (
             rally_times_net_edge_times_profit_per_trade_after_costs
         ),
@@ -1509,6 +1515,7 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "profitPerTradeAfterCosts",
         "profitPerTradeTimesWinRateAfterCosts",
         "profitPerTradeTimesNetEdgeAfterCosts",
+        "profitPerTradeTimesOneShareNetPnlAfterCosts",
         "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "netEdge",
         "recoveryFactor",
@@ -1588,6 +1595,9 @@ def write_not_saved_reason(
         "profitPerTradeAfterCosts": score.get("profitPerTradeAfterCosts", ""),
         "profitPerTradeTimesWinRateAfterCosts": score.get("profitPerTradeTimesWinRateAfterCosts", ""),
         "profitPerTradeTimesNetEdgeAfterCosts": score.get("profitPerTradeTimesNetEdgeAfterCosts", ""),
+        "profitPerTradeTimesOneShareNetPnlAfterCosts": score.get(
+            "profitPerTradeTimesOneShareNetPnlAfterCosts", ""
+        ),
         "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": score.get(
             "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", ""
         ),
@@ -1688,6 +1698,7 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("profitPerTradeAfterCosts", True),
         ("profitPerTradeTimesWinRateAfterCosts", True),
         ("profitPerTradeTimesNetEdgeAfterCosts", True),
+        ("profitPerTradeTimesOneShareNetPnlAfterCosts", True),
         ("rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", True),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
@@ -1834,6 +1845,7 @@ def get_score_fieldnames() -> list[str]:
         "profitPerTradeAfterCosts",
         "profitPerTradeTimesWinRateAfterCosts",
         "profitPerTradeTimesNetEdgeAfterCosts",
+        "profitPerTradeTimesOneShareNetPnlAfterCosts",
         "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "roiClosed",
         "roiRaw",
