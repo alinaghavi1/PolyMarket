@@ -53,6 +53,8 @@ from typing import Any
 #   wallet_test_memory.csv     حافظه تست؛ اگر پاکش کنی تست از اول شروع می‌شود
 #   closed_positions_raw.jsonl دیتای خام کامل هر والت؛ برای فرمول‌های بعدی نگهش دار
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
+#   closed_positions_raw2.jsonl دیتای آفلاین دوم؛ فقط وقتی fallback روشن باشد استفاده می‌شود
+#   closed_positions_pages2.jsonl cache صفحه‌ای دوم؛ فقط برای داده‌های گمشده استفاده می‌شود
 #   edge_scores_progress.csv   خروجی زنده CSV؛ بعد از هر والت مرتب و آپدیت می‌شود
 #   edge_scores.xlsx           خروجی آماری XLSX؛ بعد از هر والت آپدیت می‌شود
 #   wallet_not_saved_reasons.xlsx دلیل ذخیره نشدن والت‌ها در خروجی آماری
@@ -92,9 +94,15 @@ RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw.jsonl"
 # اجرای بعدی همان والت را از offset بعدی ادامه می‌دهد، نه از اول.
 CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages.jsonl"
 
+# اگر روشن باشد، مود 2 علاوه بر فایل‌های اصلی بالا، فایل‌های آفلاین دوم را هم می‌خواند.
+# فقط والت/صفحه‌هایی که داخل فایل‌های اصلی نبودند از این دو فایل fallback برداشته می‌شوند.
+USE_SECONDARY_OFFLINE_POSITION_BACKUPS = False
+SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw2.jsonl"
+SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages2.jsonl"
+
 # اگر روشن باشد، مود 2 به جای wallet_universe.csv از فایل رتبه‌بندی‌شده زیر استفاده می‌کند.
 # فایل edge_scores_by_oneShareNetPnlAfterCosts.xlsx را به این اسم تغییر بده تا برنامه از بالای لیست شروع کند.
-USE_ONE_SHARE_RANKING_INPUT = True
+USE_ONE_SHARE_RANKING_INPUT = False
 ONE_SHARE_RANKING_INPUT_FILE_NAME = "1.xlsx"
 
 # تاخیر بین درخواست‌ها به API، بر حسب ثانیه.
@@ -150,7 +158,7 @@ MAX_WALLETS_TO_SCORE = 1000000000000000
 # حداکثر چند closed position برای هر والت گرفته شود.
 # عدد کمتر = سریع‌تر ولی ممکن است دیتای والت‌های خیلی بزرگ کامل نباشد.
 # عدد بیشتر = کامل‌تر ولی کندتر.
-MAX_POSITIONS_PER_WALLET = 100000
+MAX_POSITIONS_PER_WALLET = 200
 
 # حداقل تعداد پوزیشن بسته‌شده/نتیجه‌دار برای اینکه والت وارد خروجی score شود.
 # اگر 30 باشد، والت‌هایی با کمتر از 30 پوزیشن حذف می‌شوند.
@@ -158,7 +166,7 @@ MIN_RESOLVED_POSITIONS = 1
 
 # حداقل تعداد باخت لازم.
 # این کمک می‌کند والت‌هایی که فقط چند برد و تقریباً بدون باخت دارند الکی امتیاز نگیرند.
-MIN_LOSING_POSITIONS = 1
+MIN_LOSING_POSITIONS = 0
 
 # حداقل سود بسته‌شده.
 # اگر 0 باشد، فقط والت‌هایی وارد خروجی می‌شوند که سودشان منفی نیست.
@@ -922,6 +930,10 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     )
     profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
     profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
+    profit_per_trade_times_net_edge_after_costs = profit_per_trade_after_costs * net_edge
+    rally_times_net_edge_times_profit_per_trade_after_costs = (
+        rally_times_net_edge * profit_per_trade_after_costs
+    )
     one_share_average_daily_cost_after_costs = (
         one_share_total_cost_after_costs / trading_days if trading_days else 0.0
     )
@@ -976,6 +988,10 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "expectedPayoffAfterCosts": expected_payoff,
         "profitPerTradeAfterCosts": profit_per_trade_after_costs,
         "profitPerTradeTimesWinRateAfterCosts": profit_per_trade_times_win_rate_after_costs,
+        "profitPerTradeTimesNetEdgeAfterCosts": profit_per_trade_times_net_edge_after_costs,
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": (
+            rally_times_net_edge_times_profit_per_trade_after_costs
+        ),
         "maxConsecutiveWins": max_consecutive_wins,
         "maxConsecutiveLosses": max_consecutive_losses,
         "grossProfit": gross_profit_after_costs,
@@ -1017,6 +1033,7 @@ def rank_wallets(
     preserve_wallet_order: bool = False,
 ) -> None:
     raw_path = out_dir / RAW_CLOSED_POSITIONS_LOG_FILE_NAME
+    secondary_raw_path = out_dir / SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME
     fail_path = out_dir / "closed_positions_failed.csv"
     score_path = out_dir / "edge_scores.xlsx"
     not_saved_reasons_path = out_dir / NOT_SAVED_REASONS_FILE_NAME
@@ -1024,6 +1041,7 @@ def rank_wallets(
     progress_path = out_dir / "edge_scores_progress.csv"
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
+    secondary_page_cache_path = out_dir / SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
 
     ranked_wallets = (
@@ -1050,9 +1068,27 @@ def rank_wallets(
     cached_positions = load_closed_positions_cache(raw_path)
     if cached_positions:
         print(f"[resume] loaded closed-position cache for {len(cached_positions)} wallets", flush=True)
+    if USE_SECONDARY_OFFLINE_POSITION_BACKUPS:
+        secondary_cached_positions = load_closed_positions_cache(secondary_raw_path)
+        added_wallets = merge_missing_closed_positions_cache(cached_positions, secondary_cached_positions)
+        if secondary_cached_positions:
+            print(
+                f"[resume] loaded secondary closed-position cache for {len(secondary_cached_positions)} "
+                f"wallets; added {added_wallets} missing wallets",
+                flush=True,
+            )
     page_cache = load_closed_position_page_cache(page_cache_path)
     if page_cache:
         print(f"[resume] loaded page cache for {len(page_cache)} wallets", flush=True)
+    if USE_SECONDARY_OFFLINE_POSITION_BACKUPS:
+        secondary_page_cache = load_closed_position_page_cache(secondary_page_cache_path)
+        added_pages = merge_missing_closed_position_page_cache(page_cache, secondary_page_cache)
+        if secondary_page_cache:
+            print(
+                f"[resume] loaded secondary page cache for {len(secondary_page_cache)} wallets; "
+                f"added {added_pages} missing pages",
+                flush=True,
+            )
 
     fail_file, fail_writer = open_csv_append(fail_path, ["proxyWallet", "error"])
     memory_file, memory_writer = open_csv_append(
@@ -1336,6 +1372,32 @@ def load_closed_position_page_cache(
     return cached
 
 
+def merge_missing_closed_positions_cache(
+    primary: dict[str, list[dict[str, Any]]],
+    secondary: dict[str, list[dict[str, Any]]],
+) -> int:
+    added = 0
+    for wallet, positions in secondary.items():
+        if wallet not in primary:
+            primary[wallet] = positions
+            added += 1
+    return added
+
+
+def merge_missing_closed_position_page_cache(
+    primary: dict[str, dict[int, list[dict[str, Any]]]],
+    secondary: dict[str, dict[int, list[dict[str, Any]]]],
+) -> int:
+    added = 0
+    for wallet, offsets in secondary.items():
+        primary_offsets = primary.setdefault(wallet, {})
+        for offset, rows in offsets.items():
+            if offset not in primary_offsets:
+                primary_offsets[offset] = rows
+                added += 1
+    return added
+
+
 def rewrite_closed_positions_cache(raw_path: Path, cached: dict[str, list[dict[str, Any]]]) -> None:
     with raw_path.open("w", encoding="utf-8") as file:
         for wallet, positions in cached.items():
@@ -1446,6 +1508,8 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "oneShareAverageDailyCostAfterCosts",
         "profitPerTradeAfterCosts",
         "profitPerTradeTimesWinRateAfterCosts",
+        "profitPerTradeTimesNetEdgeAfterCosts",
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
@@ -1523,6 +1587,10 @@ def write_not_saved_reason(
         "oneShareAverageDailyCostAfterCosts": score.get("oneShareAverageDailyCostAfterCosts", ""),
         "profitPerTradeAfterCosts": score.get("profitPerTradeAfterCosts", ""),
         "profitPerTradeTimesWinRateAfterCosts": score.get("profitPerTradeTimesWinRateAfterCosts", ""),
+        "profitPerTradeTimesNetEdgeAfterCosts": score.get("profitPerTradeTimesNetEdgeAfterCosts", ""),
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": score.get(
+            "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", ""
+        ),
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
@@ -1619,6 +1687,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("oneShareAverageDailyCostAfterCosts", False),
         ("profitPerTradeAfterCosts", True),
         ("profitPerTradeTimesWinRateAfterCosts", True),
+        ("profitPerTradeTimesNetEdgeAfterCosts", True),
+        ("rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", True),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
         ("profitFactorAfterCosts", True),
@@ -1763,6 +1833,8 @@ def get_score_fieldnames() -> list[str]:
         "oneShareAverageDailyCostAfterCosts",
         "profitPerTradeAfterCosts",
         "profitPerTradeTimesWinRateAfterCosts",
+        "profitPerTradeTimesNetEdgeAfterCosts",
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "roiClosed",
         "roiRaw",
         "roiAfterCosts",
@@ -1911,10 +1983,18 @@ def print_active_settings(
             f"use_one_share_ranking_input={USE_ONE_SHARE_RANKING_INPUT} "
             f"file={ONE_SHARE_RANKING_INPUT_FILE_NAME}"
         )
+        print(
+            "[offline fallback] "
+            f"use_secondary_backups={USE_SECONDARY_OFFLINE_POSITION_BACKUPS} "
+            f"raw={SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME} "
+            f"pages={SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME}"
+        )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[not saved reasons] {NOT_SAVED_REASONS_FILE_NAME} shows why wallets did not enter score files")
         print(f"[not saved reason stats] {NOT_SAVED_REASON_STATS_FILE_NAME} counts repeated removal reasons")
-        print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
+        print(
+            f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}"
+        )
         print("[live output] edge_scores_progress.csv updates during scoring")
         print("[final output] edge_scores.xlsx and edge_scores_by_<factor>.xlsx are sorted after scoring finishes")
     print("")
