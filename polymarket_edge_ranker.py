@@ -55,6 +55,8 @@ from typing import Any
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
 #   closed_positions_raw2.jsonl دیتای آفلاین دوم؛ فقط وقتی fallback روشن باشد استفاده می‌شود
 #   closed_positions_pages2.jsonl cache صفحه‌ای دوم؛ فقط برای داده‌های گمشده استفاده می‌شود
+#   wallet_trade_activity_raw.jsonl تاریخچه تک‌تک خرید و فروش‌ها برای تشخیص افزایش حجم
+#   wallet_trade_activity_pages.jsonl حافظه صفحه‌ای تاریخچه خرید و فروش‌ها
 #   edge_scores_progress.csv   خروجی زنده CSV؛ بعد از هر والت مرتب و آپدیت می‌شود
 #   edge_scores.xlsx           خروجی آماری XLSX؛ بعد از هر والت آپدیت می‌شود
 #   wallet_not_saved_reasons.xlsx دلیل ذخیره نشدن والت‌ها در خروجی آماری
@@ -93,6 +95,12 @@ RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw.jsonl"
 # اگر وسط گرفتن یک والت بزرگ قطع شود، صفحه‌های گرفته‌شده داخل این فایل می‌ماند.
 # اجرای بعدی همان والت را از offset بعدی ادامه می‌دهد، نه از اول.
 CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages.jsonl"
+
+# تاریخچه تک‌تک TRADEها برای تشخیص واقعی خرید اولیه، افزایش حجم و هج.
+USE_TRADE_ACTIVITY_HISTORY = True
+TRADE_ACTIVITY_RAW_FILE_NAME = "wallet_trade_activity_raw.jsonl"
+TRADE_ACTIVITY_PAGE_CACHE_FILE_NAME = "wallet_trade_activity_pages.jsonl"
+MAX_TRADE_ACTIVITY_PER_WALLET = 10000
 
 # اگر روشن باشد، مود 2 علاوه بر فایل‌های اصلی بالا، فایل‌های آفلاین دوم را هم می‌خواند.
 # فقط والت/صفحه‌هایی که داخل فایل‌های اصلی نبودند از این دو فایل fallback برداشته می‌شوند.
@@ -215,6 +223,9 @@ UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = False
 
 # آپدیت edge_scores_progress.csv بعد از اسکن هر والت؛ خروجی زنده CSV می‌دهد ولی روی دیتای زیاد کندتر است.
 UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET = False
+
+# اگر روشن باشد، فایل‌های خروجی CSV/XLSX موجود با خروجی اجرای جدید جایگزین می‌شوند.
+OVERWRITE_OUTPUT_FILES = True
 
 # تنظیمات هزینه محافظه‌کارانه بک‌تست کپی‌ترید.
 # چون orderbook تاریخی دقیق نداریم، هر ورود/خروج کپی‌شده با اسپرد فرضی بدتر از والت اصلی حساب می‌شود.
@@ -610,6 +621,60 @@ def fetch_closed_positions(
     return positions
 
 
+def fetch_trade_activity(
+    client: PolymarketClient,
+    wallet: str,
+    limit: int = 500,
+    max_activities: int = 10000,
+    progress_every: int = 500,
+    page_cache: dict[str, dict[int, list[dict[str, Any]]]] | None = None,
+    page_cache_file=None,
+) -> list[dict[str, Any]]:
+    activities: list[dict[str, Any]] = []
+    wallet_pages = page_cache.setdefault(wallet, {}) if page_cache is not None else {}
+    for offset in range(0, max_activities, limit):
+        if offset == 0 or offset % progress_every == 0:
+            print(
+                f"    [trade activity] {wallet} offset={offset} collected={len(activities)}",
+                flush=True,
+            )
+        if offset in wallet_pages:
+            rows = wallet_pages[offset]
+        else:
+            rows = client.get_json(
+                "/activity",
+                {
+                    "user": wallet,
+                    "limit": limit,
+                    "offset": offset,
+                    "type": "TRADE",
+                    "sortBy": "TIMESTAMP",
+                    "sortDirection": "DESC",
+                },
+            )
+            wallet_pages[offset] = rows
+            if page_cache_file is not None:
+                page_cache_file.write(
+                    json.dumps(
+                        {
+                            "proxyWallet": wallet,
+                            "offset": offset,
+                            "rows": rows,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                page_cache_file.flush()
+        if not rows:
+            break
+        activities.extend(rows)
+        if len(rows) < limit:
+            break
+    print(f"    [trade activity:done] {wallet} total={len(activities)}", flush=True)
+    return activities
+
+
 def wilson_lower_bound(wins: int, total: int, z: float = 1.96) -> float:
     if total <= 0:
         return 0.0
@@ -792,7 +857,88 @@ def adjusted_position_costs(pos: dict[str, Any], shares_override: float | None =
     }
 
 
-def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> dict[str, Any]:
+def score_trade_activity_without_volume_additions(
+    activities: list[dict[str, Any]],
+) -> dict[str, Any]:
+    buy_activities: list[dict[str, Any]] = []
+    sell_activity_count = 0
+    for activity in activities:
+        if str(activity.get("type") or "TRADE").strip().upper() != "TRADE":
+            continue
+        side = str(activity.get("side") or "").strip().upper()
+        if side == "BUY":
+            buy_activities.append(activity)
+        elif side == "SELL":
+            sell_activity_count += 1
+
+    unique_buys: dict[tuple[str, str], dict[str, Any]] = {}
+    market_outcomes: dict[str, set[str]] = {}
+    for activity_index, activity in enumerate(reversed(buy_activities)):
+        market_key = position_market_key(activity)
+        outcome_key = position_outcome_key(activity)
+        unique_key = (
+            (market_key, outcome_key)
+            if market_key and outcome_key
+            else ("__ungrouped_activity__", str(activity_index))
+        )
+        unique_buys.setdefault(unique_key, activity)
+        if market_key and outcome_key:
+            market_outcomes.setdefault(market_key, set()).add(outcome_key)
+
+    unique_buy_rows = list(unique_buys.values())
+    unique_trades_by_day: dict[str, int] = {}
+    unique_timestamps: list[float] = []
+    recent_unique_activity_count = 0
+    recent_cutoff = time.time() - RECENT_ACTIVITY_DAYS * 24 * 60 * 60
+    for activity in unique_buy_rows:
+        day_key = trade_day_key(activity)
+        unique_trades_by_day[day_key] = unique_trades_by_day.get(day_key, 0) + 1
+        timestamp = trade_timestamp(activity)
+        if timestamp is not None:
+            unique_timestamps.append(timestamp)
+            if timestamp >= recent_cutoff:
+                recent_unique_activity_count += 1
+
+    unique_trade_count = len(unique_buy_rows)
+    trading_days = len(unique_trades_by_day)
+    average_trades_per_day = unique_trade_count / trading_days if trading_days else 0.0
+    max_trades_in_one_day = max(unique_trades_by_day.values()) if unique_trades_by_day else 0
+    if unique_timestamps:
+        first_timestamp_value = min(unique_timestamps)
+        last_timestamp_value = max(unique_timestamps)
+        first_day = datetime.utcfromtimestamp(first_timestamp_value).date()
+        last_day = datetime.utcfromtimestamp(last_timestamp_value).date()
+        calendar_days = max((last_day - first_day).days + 1, 1)
+        days_since_last_trade = (time.time() - last_timestamp_value) / (24 * 60 * 60)
+    else:
+        calendar_days = 0
+        days_since_last_trade = 0.0
+
+    return {
+        "tradeActivityCount": len(buy_activities) + sell_activity_count,
+        "buyTradeActivityCount": len(buy_activities),
+        "sellTradeActivityCount": sell_activity_count,
+        "positionsWithoutVolumeAdditions": unique_trade_count,
+        "tradingDaysWithoutVolumeAdditions": trading_days,
+        "averageTradesPerDayWithoutVolumeAdditions": average_trades_per_day,
+        "maxTradesInOneDayWithoutVolumeAdditions": max_trades_in_one_day,
+        "daysSinceLastTradeWithoutVolumeAdditions": days_since_last_trade,
+        "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions": (
+            unique_trade_count / calendar_days if calendar_days else 0.0
+        ),
+        "recentActivityCountWithoutVolumeAdditions": recent_unique_activity_count,
+        "sameOutcomeVolumeAdditions": max(len(buy_activities) - unique_trade_count, 0),
+        "hedgedMarketCount": sum(
+            1 for outcomes in market_outcomes.values() if "yes" in outcomes and "no" in outcomes
+        ),
+    }
+
+
+def score_positions(
+    positions: list[dict[str, Any]],
+    smoothing: float = 1.0,
+    trade_activity: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     wins = 0
     losses = 0
     breakeven = 0
@@ -1113,7 +1259,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     else:
         sharpe_ratio = 0.0
 
-    return {
+    score = {
         "positions": len(positions),
         "positionsWithoutVolumeAdditions": positions_without_volume_additions,
         "resolvedPositions": resolved,
@@ -1233,6 +1379,9 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "shortHoldRatioWithoutVolumeAdditions": short_hold_ratio_without_volume_additions,
         "allRecentBalancesNegative": all_recent_balances_negative,
     }
+    if trade_activity is not None:
+        score.update(score_trade_activity_without_volume_additions(trade_activity))
+    return score
 
 
 def rank_wallets(
@@ -1257,6 +1406,8 @@ def rank_wallets(
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     secondary_page_cache_path = out_dir / SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME
+    trade_activity_raw_path = out_dir / TRADE_ACTIVITY_RAW_FILE_NAME
+    trade_activity_page_cache_path = out_dir / TRADE_ACTIVITY_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
 
     ranked_wallets = (
@@ -1292,6 +1443,13 @@ def rank_wallets(
                 f"wallets; added {added_wallets} missing wallets",
                 flush=True,
             )
+    cached_trade_activity = load_trade_activity_cache(trade_activity_raw_path)
+    trade_activity_page_cache = load_closed_position_page_cache(trade_activity_page_cache_path)
+    if cached_trade_activity:
+        print(
+            f"[resume] loaded trade-activity cache for {len(cached_trade_activity)} wallets",
+            flush=True,
+        )
     page_cache = load_closed_position_page_cache(page_cache_path)
     if page_cache:
         print(f"[resume] loaded page cache for {len(page_cache)} wallets", flush=True)
@@ -1310,12 +1468,22 @@ def rank_wallets(
         memory_path,
         ["proxyWallet", "userName", "status", "reason", "testedAt"],
     )
-    with raw_path.open("a", encoding="utf-8") as raw_file, fail_file, memory_file, page_cache_path.open(
-        "a", encoding="utf-8"
-    ) as page_cache_file:
+    with (
+        raw_path.open("a", encoding="utf-8") as raw_file,
+        fail_file,
+        memory_file,
+        page_cache_path.open("a", encoding="utf-8") as page_cache_file,
+        trade_activity_raw_path.open("a", encoding="utf-8") as trade_activity_raw_file,
+        trade_activity_page_cache_path.open(
+            "a", encoding="utf-8"
+        ) as trade_activity_page_cache_file,
+    ):
 
         for index, seed in enumerate(ranked_wallets, start=1):
-            if seed.proxy_wallet in tested_wallets:
+            has_required_trade_activity = (
+                not USE_TRADE_ACTIVITY_HISTORY or seed.proxy_wallet in cached_trade_activity
+            )
+            if seed.proxy_wallet in tested_wallets and has_required_trade_activity:
                 print(f"[skip] {index}/{len(ranked_wallets)} {seed.user_name} {seed.proxy_wallet}", flush=True)
                 if seed.proxy_wallet not in score_by_wallet:
                     write_not_saved_reason(
@@ -1365,7 +1533,42 @@ def rank_wallets(
                     write_live_score_outputs(score_by_wallet.values(), score_path, out_dir, score_fieldnames)
                     continue
 
-            score = score_positions(positions, smoothing=smoothing)
+            trade_activity: list[dict[str, Any]] | None = None
+            if USE_TRADE_ACTIVITY_HISTORY:
+                if seed.proxy_wallet in cached_trade_activity:
+                    trade_activity = cached_trade_activity[seed.proxy_wallet]
+                else:
+                    try:
+                        trade_activity = fetch_trade_activity(
+                            client,
+                            seed.proxy_wallet,
+                            max_activities=MAX_TRADE_ACTIVITY_PER_WALLET,
+                            page_cache=trade_activity_page_cache,
+                            page_cache_file=trade_activity_page_cache_file,
+                        )
+                        trade_activity_raw_file.write(
+                            json.dumps(
+                                {
+                                    "proxyWallet": seed.proxy_wallet,
+                                    "activities": trade_activity,
+                                },
+                                ensure_ascii=False,
+                            )
+                            + "\n"
+                        )
+                        trade_activity_raw_file.flush()
+                        cached_trade_activity[seed.proxy_wallet] = trade_activity
+                    except Exception as exc:
+                        print(
+                            f"[trade activity warning] {seed.proxy_wallet}: {exc!r}",
+                            flush=True,
+                        )
+
+            score = score_positions(
+                positions,
+                smoothing=smoothing,
+                trade_activity=trade_activity,
+            )
             if score["resolvedPositions"] < min_positions:
                 write_test_memory_row(
                     memory_writer,
@@ -1564,6 +1767,23 @@ def load_closed_positions_cache(raw_path: Path) -> dict[str, list[dict[str, Any]
     return cached
 
 
+def load_trade_activity_cache(raw_path: Path) -> dict[str, list[dict[str, Any]]]:
+    cached: dict[str, list[dict[str, Any]]] = {}
+    if not raw_path.exists():
+        return cached
+    with raw_path.open("r", encoding="utf-8") as file:
+        for line in file:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            wallet = str(row.get("proxyWallet") or "").lower()
+            activities = row.get("activities")
+            if wallet and isinstance(activities, list):
+                cached[wallet] = activities
+    return cached
+
+
 def load_closed_position_page_cache(
     page_cache_path: Path,
 ) -> dict[str, dict[int, list[dict[str, Any]]]]:
@@ -1712,6 +1932,9 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "status",
         "reason",
         "positions",
+        "tradeActivityCount",
+        "buyTradeActivityCount",
+        "sellTradeActivityCount",
         "positionsWithoutVolumeAdditions",
         "resolvedPositions",
         "resolvedPositionsWithoutVolumeAdditions",
@@ -1811,6 +2034,9 @@ def write_not_saved_reason(
         "status": status,
         "reason": reason,
         "positions": score.get("positions", ""),
+        "tradeActivityCount": score.get("tradeActivityCount", ""),
+        "buyTradeActivityCount": score.get("buyTradeActivityCount", ""),
+        "sellTradeActivityCount": score.get("sellTradeActivityCount", ""),
         "positionsWithoutVolumeAdditions": score.get("positionsWithoutVolumeAdditions", ""),
         "resolvedPositions": score.get("resolvedPositions", ""),
         "resolvedPositionsWithoutVolumeAdditions": score.get(
@@ -1927,6 +2153,8 @@ def sorted_score_rows(rows: Any) -> list[dict[str, Any]]:
 
 
 def write_sorted_scores_csv(rows: Any, path: Path, fieldnames: list[str]) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     score_rows = sorted_score_rows(rows)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -1944,6 +2172,8 @@ def sorted_rows_by_factor(rows: Any, factor: str, descending: bool = True) -> li
 
 
 def write_scores_csv(rows: Any, path: Path, fieldnames: list[str], sort_factor: str, descending: bool) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     score_rows = sorted_rows_by_factor(rows, sort_factor, descending)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -2052,6 +2282,8 @@ def write_scores_xlsx(
 
 
 def write_table_xlsx(rows: Any, path: Path, fieldnames: list[str], sheet_name: str) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     all_rows = [fieldnames]
     for rank, row in enumerate(rows, start=1):
         row = dict(row)
@@ -2105,6 +2337,9 @@ def get_score_fieldnames() -> list[str]:
         "winRate",
         "winRateWithoutVolumeAdditions",
         "positions",
+        "tradeActivityCount",
+        "buyTradeActivityCount",
+        "sellTradeActivityCount",
         "positionsWithoutVolumeAdditions",
         "resolvedPositions",
         "resolvedPositionsWithoutVolumeAdditions",
@@ -2294,7 +2529,8 @@ def print_active_settings(
             f"purge_position_jsonl={PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS} "
             f"purge_wallet_universe={PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE} "
             f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET} "
-            f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET}"
+            f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET} "
+            f"overwrite_outputs={OVERWRITE_OUTPUT_FILES}"
         )
         print(
             "[mode 2 input] "
@@ -2312,6 +2548,13 @@ def print_active_settings(
         print(f"[not saved reason stats] {NOT_SAVED_REASON_STATS_FILE_NAME} counts repeated removal reasons")
         print(
             f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}"
+        )
+        print(
+            "[trade activity] "
+            f"enabled={USE_TRADE_ACTIVITY_HISTORY} "
+            f"raw={TRADE_ACTIVITY_RAW_FILE_NAME} "
+            f"pages={TRADE_ACTIVITY_PAGE_CACHE_FILE_NAME} "
+            f"max={MAX_TRADE_ACTIVITY_PER_WALLET}"
         )
         print("[live output] edge_scores_progress.csv updates during scoring")
         print("[final output] edge_scores.xlsx and edge_scores_by_<factor>.xlsx are sorted after scoring finishes")
