@@ -671,6 +671,34 @@ def trade_day_key(pos: dict[str, Any]) -> str:
     return datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
 
 
+def position_market_key(pos: dict[str, Any]) -> str:
+    """Return the most specific available identifier for a position's market."""
+    for key in (
+        "conditionId",
+        "conditionID",
+        "marketId",
+        "marketID",
+        "questionId",
+        "questionID",
+        "marketSlug",
+        "slug",
+        "title",
+    ):
+        value = str(pos.get(key) or "").strip().lower()
+        if value:
+            return f"{key.lower()}:{value}"
+    return ""
+
+
+def position_outcome_key(pos: dict[str, Any]) -> str:
+    """Return a normalized outcome label used for repeat-entry and hedge detection."""
+    for key in ("outcome", "outcomeName", "side", "outcomeIndex"):
+        value = str(pos.get(key) if pos.get(key) is not None else "").strip().lower()
+        if value:
+            return value
+    return ""
+
+
 def current_position_value(pos: dict[str, Any]) -> float:
     return safe_float(
         pos.get("currentValue")
@@ -803,6 +831,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     short_hold_count = 0
     hold_duration_count = 0
     trades_by_day: dict[str, int] = {}
+    market_outcome_position_counts: dict[tuple[str, str], int] = {}
+    market_outcomes: dict[str, set[str]] = {}
     first_trade_ts: float | None = None
     last_trade_ts: float | None = None
     now_ts = time.time()
@@ -820,6 +850,14 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
             )
         day_key = trade_day_key(pos)
         trades_by_day[day_key] = trades_by_day.get(day_key, 0) + 1
+        market_key = position_market_key(pos)
+        outcome_key = position_outcome_key(pos)
+        if market_key and outcome_key:
+            market_outcome_key = (market_key, outcome_key)
+            market_outcome_position_counts[market_outcome_key] = (
+                market_outcome_position_counts.get(market_outcome_key, 0) + 1
+            )
+            market_outcomes.setdefault(market_key, set()).add(outcome_key)
         pnl = safe_float(pos.get("realizedPnl"))
         costs = adjusted_position_costs(pos)
         one_share_costs = adjusted_position_costs(pos, shares_override=1.0)
@@ -928,6 +966,15 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     trades_per_calendar_day_first_to_last = (
         len(positions) / calendar_trade_span_days if calendar_trade_span_days else 0.0
     )
+    same_outcome_volume_additions = sum(
+        max(position_count - 1, 0)
+        for position_count in market_outcome_position_counts.values()
+    )
+    hedged_market_count = sum(
+        1
+        for outcomes in market_outcomes.values()
+        if "yes" in outcomes and "no" in outcomes
+    )
     profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
     profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
     profit_per_trade_times_net_edge_after_costs = profit_per_trade_after_costs * net_edge
@@ -1019,6 +1066,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "maxTradesInOneDay": max_trades_in_one_day,
         "daysSinceLastTrade": days_since_last_trade,
         "tradesPerCalendarDayFirstToLast": trades_per_calendar_day_first_to_last,
+        "sameOutcomeVolumeAdditions": same_outcome_volume_additions,
+        "hedgedMarketCount": hedged_market_count,
         "shortHoldCount": short_hold_count,
         "holdDurationCount": hold_duration_count,
         "shortHoldRatio": short_hold_ratio,
@@ -1525,6 +1574,8 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "maxTradesInOneDay",
         "daysSinceLastTrade",
         "tradesPerCalendarDayFirstToLast",
+        "sameOutcomeVolumeAdditions",
+        "hedgedMarketCount",
         "shortHoldRatio",
         "allRecentBalancesNegative",
         "testedAt",
@@ -1609,6 +1660,8 @@ def write_not_saved_reason(
         "maxTradesInOneDay": score.get("maxTradesInOneDay", ""),
         "daysSinceLastTrade": score.get("daysSinceLastTrade", ""),
         "tradesPerCalendarDayFirstToLast": score.get("tradesPerCalendarDayFirstToLast", ""),
+        "sameOutcomeVolumeAdditions": score.get("sameOutcomeVolumeAdditions", ""),
+        "hedgedMarketCount": score.get("hedgedMarketCount", ""),
         "shortHoldRatio": score.get("shortHoldRatio", ""),
         "allRecentBalancesNegative": score.get("allRecentBalancesNegative", ""),
         "testedAt": int(time.time()),
@@ -1711,6 +1764,8 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("maxTradesInOneDay", True),
         ("daysSinceLastTrade", False),
         ("tradesPerCalendarDayFirstToLast", True),
+        ("sameOutcomeVolumeAdditions", True),
+        ("hedgedMarketCount", True),
         ("shortHoldRatio", False),
         ("profileViews", True),
     ]
@@ -1828,6 +1883,8 @@ def get_score_fieldnames() -> list[str]:
         "maxTradesInOneDay",
         "daysSinceLastTrade",
         "tradesPerCalendarDayFirstToLast",
+        "sameOutcomeVolumeAdditions",
+        "hedgedMarketCount",
         "sumWinEdge",
         "sumLossRisk",
         "sumWinEdgeSq",
