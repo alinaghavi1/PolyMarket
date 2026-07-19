@@ -806,6 +806,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     total_bought_after_costs = 0.0
     one_share_net_pnl_after_costs = 0.0
     one_share_total_cost_after_costs = 0.0
+    one_share_net_pnl_after_costs_without_volume_additions = 0.0
+    one_share_total_cost_after_costs_without_volume_additions = 0.0
     gross_profit = 0.0
     gross_loss = 0.0
     gross_profit_after_costs = 0.0
@@ -828,18 +830,26 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     max_drawdown = 0.0
     recent_balance_values: list[float] = []
     recent_activity_count = 0
+    recent_activity_count_without_volume_additions = 0
     short_hold_count = 0
     hold_duration_count = 0
+    short_hold_count_without_volume_additions = 0
+    hold_duration_count_without_volume_additions = 0
     trades_by_day: dict[str, int] = {}
+    trades_by_day_without_volume_additions: dict[str, int] = {}
     market_outcome_position_counts: dict[tuple[str, str], int] = {}
     market_outcomes: dict[str, set[str]] = {}
+    unique_trade_keys: set[tuple[str, str]] = set()
+    pnl_by_unique_trade: dict[tuple[str, str], float] = {}
     first_trade_ts: float | None = None
     last_trade_ts: float | None = None
+    first_trade_without_volume_additions_ts: float | None = None
+    last_trade_without_volume_additions_ts: float | None = None
     now_ts = time.time()
     recent_cutoff = now_ts - RECENT_ACTIVITY_DAYS * 24 * 60 * 60
     short_hold_seconds = SHORT_HOLD_MAX_HOURS * 60 * 60
 
-    for pos in positions:
+    for position_index, pos in enumerate(positions):
         position_trade_ts = trade_timestamp(pos)
         if position_trade_ts is not None:
             first_trade_ts = (
@@ -852,6 +862,28 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         trades_by_day[day_key] = trades_by_day.get(day_key, 0) + 1
         market_key = position_market_key(pos)
         outcome_key = position_outcome_key(pos)
+        unique_trade_key = (
+            (market_key, outcome_key)
+            if market_key and outcome_key
+            else ("__ungrouped_position__", str(position_index))
+        )
+        is_trade_without_volume_addition = unique_trade_key not in unique_trade_keys
+        if is_trade_without_volume_addition:
+            unique_trade_keys.add(unique_trade_key)
+            trades_by_day_without_volume_additions[day_key] = (
+                trades_by_day_without_volume_additions.get(day_key, 0) + 1
+            )
+            if position_trade_ts is not None:
+                first_trade_without_volume_additions_ts = (
+                    position_trade_ts
+                    if first_trade_without_volume_additions_ts is None
+                    else min(first_trade_without_volume_additions_ts, position_trade_ts)
+                )
+                last_trade_without_volume_additions_ts = (
+                    position_trade_ts
+                    if last_trade_without_volume_additions_ts is None
+                    else max(last_trade_without_volume_additions_ts, position_trade_ts)
+                )
         if market_key and outcome_key:
             market_outcome_key = (market_key, outcome_key)
             market_outcome_position_counts[market_outcome_key] = (
@@ -859,6 +891,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
             )
             market_outcomes.setdefault(market_key, set()).add(outcome_key)
         pnl = safe_float(pos.get("realizedPnl"))
+        pnl_by_unique_trade[unique_trade_key] = pnl_by_unique_trade.get(unique_trade_key, 0.0) + pnl
         costs = adjusted_position_costs(pos)
         one_share_costs = adjusted_position_costs(pos, shares_override=1.0)
         net_pnl = costs["netPnlAfterFeesAndSpread"]
@@ -867,6 +900,13 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         realized_pnl_after_costs += net_pnl
         one_share_net_pnl_after_costs += one_share_costs["netPnlAfterFeesAndSpread"]
         one_share_total_cost_after_costs += one_share_costs["copyEntryPrice"] + one_share_costs["entryFee"]
+        if is_trade_without_volume_addition:
+            one_share_net_pnl_after_costs_without_volume_additions += one_share_costs[
+                "netPnlAfterFeesAndSpread"
+            ]
+            one_share_total_cost_after_costs_without_volume_additions += (
+                one_share_costs["copyEntryPrice"] + one_share_costs["entryFee"]
+            )
         total_entry_fees += costs["entryFee"]
         total_exit_fees += costs["exitFee"]
         total_assumed_spread_cost += costs["shares"] * max(costs["copyEntryPrice"] - costs["walletEntryPrice"], 0.0)
@@ -891,10 +931,16 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
             close_ts is not None and close_ts >= recent_cutoff
         ):
             recent_activity_count += 1
+            if is_trade_without_volume_addition:
+                recent_activity_count_without_volume_additions += 1
         if open_ts is not None and close_ts is not None and close_ts >= open_ts:
             hold_duration_count += 1
+            if is_trade_without_volume_addition:
+                hold_duration_count_without_volume_additions += 1
             if close_ts - open_ts < short_hold_seconds:
                 short_hold_count += 1
+                if is_trade_without_volume_addition:
+                    short_hold_count_without_volume_additions += 1
 
         if pnl > 0:
             wins += 1
@@ -928,6 +974,15 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
             gross_loss_after_costs += abs(net_pnl)
 
     resolved = wins + losses
+    positions_without_volume_additions = len(unique_trade_keys)
+    wins_without_volume_additions = sum(1 for pnl in pnl_by_unique_trade.values() if pnl > 0)
+    losses_without_volume_additions = sum(1 for pnl in pnl_by_unique_trade.values() if pnl < 0)
+    breakeven_without_volume_additions = sum(
+        1 for pnl in pnl_by_unique_trade.values() if pnl == 0
+    )
+    resolved_without_volume_additions = (
+        wins_without_volume_additions + losses_without_volume_additions
+    )
     net_edge = sum_win_edge - sum_loss_risk
     edge_rally_denominator = sum_loss_risk_sq if losses > 0 and sum_loss_risk_sq > 0 else smoothing
     edge_rally_raw = sum_win_edge_sq / edge_rally_denominator
@@ -936,6 +991,11 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     edge_rally = rally_times_net_edge
     net_edge_score = rally_times_net_edge
     win_rate = wins / resolved if resolved else 0.0
+    win_rate_without_volume_additions = (
+        wins_without_volume_additions / resolved_without_volume_additions
+        if resolved_without_volume_additions
+        else 0.0
+    )
     avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
     adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
     roi_closed = realized_pnl / total_bought if total_bought > 0 else 0.0
@@ -949,14 +1009,40 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     recovery_factor = realized_pnl_after_costs / max_drawdown if max_drawdown > 0 else 0.0
     net_edge_to_max_drawdown = net_edge / max_drawdown if max_drawdown > 0 else 0.0
     short_hold_ratio = short_hold_count / hold_duration_count if hold_duration_count else 0.0
+    short_hold_ratio_without_volume_additions = (
+        short_hold_count_without_volume_additions / hold_duration_count_without_volume_additions
+        if hold_duration_count_without_volume_additions
+        else 0.0
+    )
     all_recent_balances_negative = bool(recent_balance_values) and all(
         value < 0 for value in recent_balance_values
     )
     expected_payoff = realized_pnl_after_costs / resolved if resolved else 0.0
+    expected_payoff_without_volume_additions = (
+        realized_pnl_after_costs / resolved_without_volume_additions
+        if resolved_without_volume_additions
+        else 0.0
+    )
     trading_days = len(trades_by_day)
     average_trades_per_day = len(positions) / trading_days if trading_days else 0.0
     max_trades_in_one_day = max(trades_by_day.values()) if trades_by_day else 0
     days_since_last_trade = (now_ts - last_trade_ts) / (24 * 60 * 60) if last_trade_ts is not None else 0.0
+    trading_days_without_volume_additions = len(trades_by_day_without_volume_additions)
+    average_trades_per_day_without_volume_additions = (
+        positions_without_volume_additions / trading_days_without_volume_additions
+        if trading_days_without_volume_additions
+        else 0.0
+    )
+    max_trades_in_one_day_without_volume_additions = (
+        max(trades_by_day_without_volume_additions.values())
+        if trades_by_day_without_volume_additions
+        else 0
+    )
+    days_since_last_trade_without_volume_additions = (
+        (now_ts - last_trade_without_volume_additions_ts) / (24 * 60 * 60)
+        if last_trade_without_volume_additions_ts is not None
+        else 0.0
+    )
     if first_trade_ts is not None and last_trade_ts is not None:
         first_trade_day = datetime.utcfromtimestamp(first_trade_ts).date()
         last_trade_day = datetime.utcfromtimestamp(last_trade_ts).date()
@@ -965,6 +1051,27 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         calendar_trade_span_days = 0
     trades_per_calendar_day_first_to_last = (
         len(positions) / calendar_trade_span_days if calendar_trade_span_days else 0.0
+    )
+    if (
+        first_trade_without_volume_additions_ts is not None
+        and last_trade_without_volume_additions_ts is not None
+    ):
+        first_unique_trade_day = datetime.utcfromtimestamp(
+            first_trade_without_volume_additions_ts
+        ).date()
+        last_unique_trade_day = datetime.utcfromtimestamp(
+            last_trade_without_volume_additions_ts
+        ).date()
+        calendar_trade_span_days_without_volume_additions = max(
+            (last_unique_trade_day - first_unique_trade_day).days + 1,
+            1,
+        )
+    else:
+        calendar_trade_span_days_without_volume_additions = 0
+    trades_per_calendar_day_first_to_last_without_volume_additions = (
+        positions_without_volume_additions / calendar_trade_span_days_without_volume_additions
+        if calendar_trade_span_days_without_volume_additions
+        else 0.0
     )
     same_outcome_volume_additions = sum(
         max(position_count - 1, 0)
@@ -976,6 +1083,11 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         if "yes" in outcomes and "no" in outcomes
     )
     profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
+    profit_per_trade_after_costs_without_volume_additions = (
+        realized_pnl_after_costs / positions_without_volume_additions
+        if positions_without_volume_additions
+        else 0.0
+    )
     profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
     profit_per_trade_times_net_edge_after_costs = profit_per_trade_after_costs * net_edge
     profit_per_trade_times_one_share_net_pnl_after_costs = (
@@ -987,6 +1099,12 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     one_share_average_daily_cost_after_costs = (
         one_share_total_cost_after_costs / trading_days if trading_days else 0.0
     )
+    one_share_average_daily_cost_after_costs_without_volume_additions = (
+        one_share_total_cost_after_costs_without_volume_additions
+        / trading_days_without_volume_additions
+        if trading_days_without_volume_additions
+        else 0.0
+    )
     if len(pnl_series) > 1:
         mean_pnl = sum(pnl_series) / len(pnl_series)
         variance = sum((pnl - mean_pnl) ** 2 for pnl in pnl_series) / (len(pnl_series) - 1)
@@ -997,11 +1115,17 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
 
     return {
         "positions": len(positions),
+        "positionsWithoutVolumeAdditions": positions_without_volume_additions,
         "resolvedPositions": resolved,
+        "resolvedPositionsWithoutVolumeAdditions": resolved_without_volume_additions,
         "wins": wins,
+        "winsWithoutVolumeAdditions": wins_without_volume_additions,
         "losses": losses,
+        "lossesWithoutVolumeAdditions": losses_without_volume_additions,
         "breakeven": breakeven,
+        "breakevenWithoutVolumeAdditions": breakeven_without_volume_additions,
         "winRate": win_rate,
+        "winRateWithoutVolumeAdditions": win_rate_without_volume_additions,
         "adjustedWinRate": adjusted_win_rate,
         "sumWinEdge": sum_win_edge,
         "sumLossRisk": sum_loss_risk,
@@ -1021,8 +1145,17 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "totalBoughtClosedRaw": total_bought,
         "totalBoughtAfterCosts": total_bought_after_costs,
         "oneShareNetPnlAfterCosts": one_share_net_pnl_after_costs,
+        "oneShareNetPnlAfterCostsWithoutVolumeAdditions": (
+            one_share_net_pnl_after_costs_without_volume_additions
+        ),
         "oneShareTotalCostAfterCosts": one_share_total_cost_after_costs,
+        "oneShareTotalCostAfterCostsWithoutVolumeAdditions": (
+            one_share_total_cost_after_costs_without_volume_additions
+        ),
         "oneShareAverageDailyCostAfterCosts": one_share_average_daily_cost_after_costs,
+        "oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions": (
+            one_share_average_daily_cost_after_costs_without_volume_additions
+        ),
         "roiClosed": roi_after_costs,
         "roiRaw": roi_closed,
         "roiAfterCosts": roi_after_costs,
@@ -1036,7 +1169,13 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "sharpeRatio": sharpe_ratio,
         "expectedPayoff": expected_payoff,
         "expectedPayoffAfterCosts": expected_payoff,
+        "expectedPayoffAfterCostsWithoutVolumeAdditions": (
+            expected_payoff_without_volume_additions
+        ),
         "profitPerTradeAfterCosts": profit_per_trade_after_costs,
+        "profitPerTradeAfterCostsWithoutVolumeAdditions": (
+            profit_per_trade_after_costs_without_volume_additions
+        ),
         "profitPerTradeTimesWinRateAfterCosts": profit_per_trade_times_win_rate_after_costs,
         "profitPerTradeTimesNetEdgeAfterCosts": profit_per_trade_times_net_edge_after_costs,
         "profitPerTradeTimesOneShareNetPnlAfterCosts": (
@@ -1061,16 +1200,37 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "assumedSpread": ASSUMED_SPREAD if USE_ASSUMED_SPREAD else 0.0,
         "assumedSpreadCost": total_assumed_spread_cost,
         "recentActivityCount": recent_activity_count,
+        "recentActivityCountWithoutVolumeAdditions": (
+            recent_activity_count_without_volume_additions
+        ),
         "tradingDays": trading_days,
+        "tradingDaysWithoutVolumeAdditions": trading_days_without_volume_additions,
         "averageTradesPerDay": average_trades_per_day,
+        "averageTradesPerDayWithoutVolumeAdditions": (
+            average_trades_per_day_without_volume_additions
+        ),
         "maxTradesInOneDay": max_trades_in_one_day,
+        "maxTradesInOneDayWithoutVolumeAdditions": (
+            max_trades_in_one_day_without_volume_additions
+        ),
         "daysSinceLastTrade": days_since_last_trade,
+        "daysSinceLastTradeWithoutVolumeAdditions": (
+            days_since_last_trade_without_volume_additions
+        ),
         "tradesPerCalendarDayFirstToLast": trades_per_calendar_day_first_to_last,
+        "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions": (
+            trades_per_calendar_day_first_to_last_without_volume_additions
+        ),
         "sameOutcomeVolumeAdditions": same_outcome_volume_additions,
         "hedgedMarketCount": hedged_market_count,
         "shortHoldCount": short_hold_count,
+        "shortHoldCountWithoutVolumeAdditions": short_hold_count_without_volume_additions,
         "holdDurationCount": hold_duration_count,
+        "holdDurationCountWithoutVolumeAdditions": (
+            hold_duration_count_without_volume_additions
+        ),
         "shortHoldRatio": short_hold_ratio,
+        "shortHoldRatioWithoutVolumeAdditions": short_hold_ratio_without_volume_additions,
         "allRecentBalancesNegative": all_recent_balances_negative,
     }
 
@@ -1552,16 +1712,26 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "status",
         "reason",
         "positions",
+        "positionsWithoutVolumeAdditions",
         "resolvedPositions",
+        "resolvedPositionsWithoutVolumeAdditions",
         "wins",
+        "winsWithoutVolumeAdditions",
         "losses",
+        "lossesWithoutVolumeAdditions",
+        "breakevenWithoutVolumeAdditions",
+        "winRateWithoutVolumeAdditions",
         "realizedPnlClosed",
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareNetPnlAfterCostsWithoutVolumeAdditions",
         "oneShareTotalCostAfterCosts",
+        "oneShareTotalCostAfterCostsWithoutVolumeAdditions",
         "oneShareAverageDailyCostAfterCosts",
+        "oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions",
         "profitPerTradeAfterCosts",
+        "profitPerTradeAfterCostsWithoutVolumeAdditions",
         "profitPerTradeTimesWinRateAfterCosts",
         "profitPerTradeTimesNetEdgeAfterCosts",
         "profitPerTradeTimesOneShareNetPnlAfterCosts",
@@ -1569,14 +1739,21 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
+        "recentActivityCountWithoutVolumeAdditions",
         "tradingDays",
+        "tradingDaysWithoutVolumeAdditions",
         "averageTradesPerDay",
+        "averageTradesPerDayWithoutVolumeAdditions",
         "maxTradesInOneDay",
+        "maxTradesInOneDayWithoutVolumeAdditions",
         "daysSinceLastTrade",
+        "daysSinceLastTradeWithoutVolumeAdditions",
         "tradesPerCalendarDayFirstToLast",
+        "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions",
         "sameOutcomeVolumeAdditions",
         "hedgedMarketCount",
         "shortHoldRatio",
+        "shortHoldRatioWithoutVolumeAdditions",
         "allRecentBalancesNegative",
         "testedAt",
     ]
@@ -1634,16 +1811,36 @@ def write_not_saved_reason(
         "status": status,
         "reason": reason,
         "positions": score.get("positions", ""),
+        "positionsWithoutVolumeAdditions": score.get("positionsWithoutVolumeAdditions", ""),
         "resolvedPositions": score.get("resolvedPositions", ""),
+        "resolvedPositionsWithoutVolumeAdditions": score.get(
+            "resolvedPositionsWithoutVolumeAdditions", ""
+        ),
         "wins": score.get("wins", ""),
+        "winsWithoutVolumeAdditions": score.get("winsWithoutVolumeAdditions", ""),
         "losses": score.get("losses", ""),
+        "lossesWithoutVolumeAdditions": score.get("lossesWithoutVolumeAdditions", ""),
+        "breakevenWithoutVolumeAdditions": score.get("breakevenWithoutVolumeAdditions", ""),
+        "winRateWithoutVolumeAdditions": score.get("winRateWithoutVolumeAdditions", ""),
         "realizedPnlClosed": score.get("realizedPnlClosed", ""),
         "realizedPnlClosedRaw": score.get("realizedPnlClosedRaw", ""),
         "realizedPnlAfterCosts": score.get("realizedPnlAfterCosts", ""),
         "oneShareNetPnlAfterCosts": score.get("oneShareNetPnlAfterCosts", ""),
+        "oneShareNetPnlAfterCostsWithoutVolumeAdditions": score.get(
+            "oneShareNetPnlAfterCostsWithoutVolumeAdditions", ""
+        ),
         "oneShareTotalCostAfterCosts": score.get("oneShareTotalCostAfterCosts", ""),
+        "oneShareTotalCostAfterCostsWithoutVolumeAdditions": score.get(
+            "oneShareTotalCostAfterCostsWithoutVolumeAdditions", ""
+        ),
         "oneShareAverageDailyCostAfterCosts": score.get("oneShareAverageDailyCostAfterCosts", ""),
+        "oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions": score.get(
+            "oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions", ""
+        ),
         "profitPerTradeAfterCosts": score.get("profitPerTradeAfterCosts", ""),
+        "profitPerTradeAfterCostsWithoutVolumeAdditions": score.get(
+            "profitPerTradeAfterCostsWithoutVolumeAdditions", ""
+        ),
         "profitPerTradeTimesWinRateAfterCosts": score.get("profitPerTradeTimesWinRateAfterCosts", ""),
         "profitPerTradeTimesNetEdgeAfterCosts": score.get("profitPerTradeTimesNetEdgeAfterCosts", ""),
         "profitPerTradeTimesOneShareNetPnlAfterCosts": score.get(
@@ -1655,14 +1852,35 @@ def write_not_saved_reason(
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
+        "recentActivityCountWithoutVolumeAdditions": score.get(
+            "recentActivityCountWithoutVolumeAdditions", ""
+        ),
         "tradingDays": score.get("tradingDays", ""),
+        "tradingDaysWithoutVolumeAdditions": score.get(
+            "tradingDaysWithoutVolumeAdditions", ""
+        ),
         "averageTradesPerDay": score.get("averageTradesPerDay", ""),
+        "averageTradesPerDayWithoutVolumeAdditions": score.get(
+            "averageTradesPerDayWithoutVolumeAdditions", ""
+        ),
         "maxTradesInOneDay": score.get("maxTradesInOneDay", ""),
+        "maxTradesInOneDayWithoutVolumeAdditions": score.get(
+            "maxTradesInOneDayWithoutVolumeAdditions", ""
+        ),
         "daysSinceLastTrade": score.get("daysSinceLastTrade", ""),
+        "daysSinceLastTradeWithoutVolumeAdditions": score.get(
+            "daysSinceLastTradeWithoutVolumeAdditions", ""
+        ),
         "tradesPerCalendarDayFirstToLast": score.get("tradesPerCalendarDayFirstToLast", ""),
+        "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions": score.get(
+            "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions", ""
+        ),
         "sameOutcomeVolumeAdditions": score.get("sameOutcomeVolumeAdditions", ""),
         "hedgedMarketCount": score.get("hedgedMarketCount", ""),
         "shortHoldRatio": score.get("shortHoldRatio", ""),
+        "shortHoldRatioWithoutVolumeAdditions": score.get(
+            "shortHoldRatioWithoutVolumeAdditions", ""
+        ),
         "allRecentBalancesNegative": score.get("allRecentBalancesNegative", ""),
         "testedAt": int(time.time()),
     }
@@ -1744,11 +1962,16 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("rallyTimesOneShareNetPnlAfterCosts", True),
         ("adjustedWinRate", True),
         ("winRate", True),
+        ("winRateWithoutVolumeAdditions", True),
         ("realizedPnlAfterCosts", True),
         ("oneShareNetPnlAfterCosts", True),
+        ("oneShareNetPnlAfterCostsWithoutVolumeAdditions", True),
         ("oneShareTotalCostAfterCosts", False),
+        ("oneShareTotalCostAfterCostsWithoutVolumeAdditions", False),
         ("oneShareAverageDailyCostAfterCosts", False),
+        ("oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions", False),
         ("profitPerTradeAfterCosts", True),
+        ("profitPerTradeAfterCostsWithoutVolumeAdditions", True),
         ("profitPerTradeTimesWinRateAfterCosts", True),
         ("profitPerTradeTimesNetEdgeAfterCosts", True),
         ("profitPerTradeTimesOneShareNetPnlAfterCosts", True),
@@ -1760,13 +1983,19 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("netEdgeToMaxDrawdown", True),
         ("sharpeRatio", True),
         ("expectedPayoffAfterCosts", True),
+        ("expectedPayoffAfterCostsWithoutVolumeAdditions", True),
         ("averageTradesPerDay", True),
+        ("averageTradesPerDayWithoutVolumeAdditions", True),
         ("maxTradesInOneDay", True),
+        ("maxTradesInOneDayWithoutVolumeAdditions", True),
         ("daysSinceLastTrade", False),
+        ("daysSinceLastTradeWithoutVolumeAdditions", False),
         ("tradesPerCalendarDayFirstToLast", True),
+        ("tradesPerCalendarDayFirstToLastWithoutVolumeAdditions", True),
         ("sameOutcomeVolumeAdditions", True),
         ("hedgedMarketCount", True),
         ("shortHoldRatio", False),
+        ("shortHoldRatioWithoutVolumeAdditions", False),
         ("profileViews", True),
     ]
     for factor, descending in factors:
@@ -1874,15 +2103,25 @@ def get_score_fieldnames() -> list[str]:
         "netEdgeScore",
         "adjustedWinRate",
         "winRate",
+        "winRateWithoutVolumeAdditions",
         "positions",
+        "positionsWithoutVolumeAdditions",
         "resolvedPositions",
+        "resolvedPositionsWithoutVolumeAdditions",
         "wins",
+        "winsWithoutVolumeAdditions",
         "losses",
+        "lossesWithoutVolumeAdditions",
         "breakeven",
+        "breakevenWithoutVolumeAdditions",
         "averageTradesPerDay",
+        "averageTradesPerDayWithoutVolumeAdditions",
         "maxTradesInOneDay",
+        "maxTradesInOneDayWithoutVolumeAdditions",
         "daysSinceLastTrade",
+        "daysSinceLastTradeWithoutVolumeAdditions",
         "tradesPerCalendarDayFirstToLast",
+        "tradesPerCalendarDayFirstToLastWithoutVolumeAdditions",
         "sameOutcomeVolumeAdditions",
         "hedgedMarketCount",
         "sumWinEdge",
@@ -1897,9 +2136,13 @@ def get_score_fieldnames() -> list[str]:
         "totalBoughtClosedRaw",
         "totalBoughtAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareNetPnlAfterCostsWithoutVolumeAdditions",
         "oneShareTotalCostAfterCosts",
+        "oneShareTotalCostAfterCostsWithoutVolumeAdditions",
         "oneShareAverageDailyCostAfterCosts",
+        "oneShareAverageDailyCostAfterCostsWithoutVolumeAdditions",
         "profitPerTradeAfterCosts",
+        "profitPerTradeAfterCostsWithoutVolumeAdditions",
         "profitPerTradeTimesWinRateAfterCosts",
         "profitPerTradeTimesNetEdgeAfterCosts",
         "profitPerTradeTimesOneShareNetPnlAfterCosts",
@@ -1917,6 +2160,7 @@ def get_score_fieldnames() -> list[str]:
         "sharpeRatio",
         "expectedPayoff",
         "expectedPayoffAfterCosts",
+        "expectedPayoffAfterCostsWithoutVolumeAdditions",
         "maxConsecutiveWins",
         "maxConsecutiveLosses",
         "grossProfit",
@@ -1933,10 +2177,15 @@ def get_score_fieldnames() -> list[str]:
         "entryFee",
         "exitFee",
         "recentActivityCount",
+        "recentActivityCountWithoutVolumeAdditions",
         "tradingDays",
+        "tradingDaysWithoutVolumeAdditions",
         "shortHoldCount",
+        "shortHoldCountWithoutVolumeAdditions",
         "holdDurationCount",
+        "holdDurationCountWithoutVolumeAdditions",
         "shortHoldRatio",
+        "shortHoldRatioWithoutVolumeAdditions",
         "allRecentBalancesNegative",
         "edgeRally",
         "edgeRallyRaw",
