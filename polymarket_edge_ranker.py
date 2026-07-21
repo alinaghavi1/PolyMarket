@@ -183,6 +183,9 @@ FILTER_ALL_RECENT_BALANCES_NEGATIVE = False
 # فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
 FILTER_NEGATIVE_NET_EDGE = True
 
+# فیلتر سود یک‌سهمی غیرمثبت؛ اگر روشن باشد والت‌هایی که oneShareNetPnlAfterCosts آن‌ها منفی یا صفر است حذف می‌شوند.
+FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS = False
+
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
 FILTER_MIN_RECOVERY_FACTOR = False
 
@@ -1338,6 +1341,11 @@ def mode_2_filter_reason(score: dict[str, Any]) -> str:
         return "all recent balances are negative"
     if FILTER_NEGATIVE_NET_EDGE and score["netEdge"] < 0:
         return f"netEdge {score['netEdge']} < 0"
+    if (
+        FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS
+        and score["oneShareNetPnlAfterCosts"] <= 0
+    ):
+        return f"oneShareNetPnlAfterCosts {score['oneShareNetPnlAfterCosts']} <= 0"
     if FILTER_MIN_RECOVERY_FACTOR and score["recoveryFactor"] < MIN_RECOVERY_FACTOR:
         return f"recoveryFactor {score['recoveryFactor']} < {MIN_RECOVERY_FACTOR}"
     if FILTER_NO_RECENT_7D_OPEN_OR_CLOSE and score["recentActivityCount"] <= 0:
@@ -1564,6 +1572,8 @@ def normalize_not_saved_reason(reason: str) -> str:
         return "recoveryFactor < minimum"
     if re.match(r"netEdge .+ < 0", reason):
         return "netEdge < 0"
+    if re.match(r"oneShareNetPnlAfterCosts .+ <= 0", reason):
+        return "oneShareNetPnlAfterCosts <= 0"
     if re.match(r"resolvedPositions .+ < .+", reason):
         return "resolvedPositions < minimum"
     if re.match(r"losses .+ < .+", reason):
@@ -2004,6 +2014,8 @@ def print_active_settings(
             "[mode 2 filters] "
             f"all_recent_balances_negative={FILTER_ALL_RECENT_BALANCES_NEGATIVE} "
             f"negative_net_edge={FILTER_NEGATIVE_NET_EDGE} "
+            f"non_positive_one_share_net_pnl_after_costs="
+            f"{FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS} "
             f"min_recovery_factor={FILTER_MIN_RECOVERY_FACTOR}:{MIN_RECOVERY_FACTOR} "
             f"recent_activity_days={FILTER_NO_RECENT_7D_OPEN_OR_CLOSE}:{RECENT_ACTIVITY_DAYS} "
             f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
