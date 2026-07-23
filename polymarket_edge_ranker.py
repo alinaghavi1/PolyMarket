@@ -28,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime
@@ -48,9 +49,12 @@ from typing import Any
 #
 # فایل‌های مهم خروجی:
 #   wallet_universe.csv        لیست والت‌های استخراج‌شده از لیدربوردها
+#   1.xlsx                     ورودی رتبه‌بندی‌شده مود 2؛ همان edge_scores_by_oneShareNetPnlAfterCosts.xlsx که اسمش را عوض کرده‌ای
 #   wallet_test_memory.csv     حافظه تست؛ اگر پاکش کنی تست از اول شروع می‌شود
 #   closed_positions_raw.jsonl دیتای خام کامل هر والت؛ برای فرمول‌های بعدی نگهش دار
 #   closed_positions_pages.jsonl حافظه صفحه‌ای؛ اگر وسط یک والت بزرگ قطع شد از ادامه می‌رود
+#   closed_positions_raw2.jsonl دیتای آفلاین دوم؛ فقط وقتی fallback روشن باشد استفاده می‌شود
+#   closed_positions_pages2.jsonl cache صفحه‌ای دوم؛ فقط برای داده‌های گمشده استفاده می‌شود
 #   edge_scores_progress.csv   خروجی زنده CSV؛ بعد از هر والت مرتب و آپدیت می‌شود
 #   edge_scores.xlsx           خروجی آماری XLSX؛ بعد از هر والت آپدیت می‌شود
 #   wallet_not_saved_reasons.xlsx دلیل ذخیره نشدن والت‌ها در خروجی آماری
@@ -89,6 +93,17 @@ RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw.jsonl"
 # اگر وسط گرفتن یک والت بزرگ قطع شود، صفحه‌های گرفته‌شده داخل این فایل می‌ماند.
 # اجرای بعدی همان والت را از offset بعدی ادامه می‌دهد، نه از اول.
 CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages.jsonl"
+
+# اگر روشن باشد، مود 2 علاوه بر فایل‌های اصلی بالا، فایل‌های آفلاین دوم را هم می‌خواند.
+# فقط والت/صفحه‌هایی که داخل فایل‌های اصلی نبودند از این دو فایل fallback برداشته می‌شوند.
+USE_SECONDARY_OFFLINE_POSITION_BACKUPS = False
+SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME = "closed_positions_raw2.jsonl"
+SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME = "closed_positions_pages2.jsonl"
+
+# اگر روشن باشد، مود 2 به جای wallet_universe.csv از فایل رتبه‌بندی‌شده زیر استفاده می‌کند.
+# فایل edge_scores_by_oneShareNetPnlAfterCosts.xlsx را به این اسم تغییر بده تا برنامه از بالای لیست شروع کند.
+USE_ONE_SHARE_RANKING_INPUT = False
+ONE_SHARE_RANKING_INPUT_FILE_NAME = "1.xlsx"
 
 # تاخیر بین درخواست‌ها به API، بر حسب ثانیه.
 # عدد بالاتر = کندتر ولی امن‌تر برای rate limit / Cloudflare.
@@ -143,7 +158,7 @@ MAX_WALLETS_TO_SCORE = 1000000000000000
 # حداکثر چند closed position برای هر والت گرفته شود.
 # عدد کمتر = سریع‌تر ولی ممکن است دیتای والت‌های خیلی بزرگ کامل نباشد.
 # عدد بیشتر = کامل‌تر ولی کندتر.
-MAX_POSITIONS_PER_WALLET = 1000
+MAX_POSITIONS_PER_WALLET = 100000000000000
 
 # حداقل تعداد پوزیشن بسته‌شده/نتیجه‌دار برای اینکه والت وارد خروجی score شود.
 # اگر 30 باشد، والت‌هایی با کمتر از 30 پوزیشن حذف می‌شوند.
@@ -151,22 +166,25 @@ MIN_RESOLVED_POSITIONS = 1
 
 # حداقل تعداد باخت لازم.
 # این کمک می‌کند والت‌هایی که فقط چند برد و تقریباً بدون باخت دارند الکی امتیاز نگیرند.
-MIN_LOSING_POSITIONS = 1
+MIN_LOSING_POSITIONS = 0
 
 # حداقل سود بسته‌شده.
 # اگر 0 باشد، فقط والت‌هایی وارد خروجی می‌شوند که سودشان منفی نیست.
 # برای تست آزاد می‌توانی عدد منفی خیلی بزرگ بگذاری.
 MIN_CLOSED_REALIZED_PNL = 0.0
 
-# smoothing مخرج فرمول Edge Rally.
-# مقدار 1 از تقسیم بر صفر جلوگیری می‌کند و جلوی امتیازهای مصنوعی خیلی بزرگ را می‌گیرد.
+# مخرج پیش‌فرض فرمول Edge Rally فقط وقتی هیچ ضرری وجود ندارد.
+# وقتی ضرر وجود دارد، مخرج همان sumLossRiskSq است و smoothing اضافه نمی‌شود.
 SMOOTHING = 1.0
 
 # فیلتر منفی بودن موجودی اخیر همه معاملات؛ اگر روشن باشد والت‌هایی که مقدار فعلی همه معاملاتشان منفی است حذف می‌شوند.
-FILTER_ALL_RECENT_BALANCES_NEGATIVE = True
+FILTER_ALL_RECENT_BALANCES_NEGATIVE = False
 
 # فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
 FILTER_NEGATIVE_NET_EDGE = True
+
+# فیلتر سود یک‌سهمی غیرمثبت؛ اگر روشن باشد والت‌هایی که oneShareNetPnlAfterCosts آن‌ها منفی یا صفر است حذف می‌شوند.
+FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS = True
 
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
 FILTER_MIN_RECOVERY_FACTOR = False
@@ -178,7 +196,7 @@ MIN_RECOVERY_FACTOR = 5
 FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
 
 # تعداد روز برای فیلتر فعالیت اخیر.
-RECENT_ACTIVITY_DAYS = 15
+RECENT_ACTIVITY_DAYS = 20
 
 # فیلتر معاملات کوتاه‌مدت؛ اگر روشن باشد والت‌هایی که درصد زیادی معامله زیر زمان مشخص دارند حذف می‌شوند.
 FILTER_SHORT_HOLD_RATIO = False
@@ -200,6 +218,9 @@ UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = False
 
 # آپدیت edge_scores_progress.csv بعد از اسکن هر والت؛ خروجی زنده CSV می‌دهد ولی روی دیتای زیاد کندتر است.
 UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET = False
+
+# اگر روشن باشد، فایل‌های خروجی CSV/XLSX موجود با خروجی اجرای جدید جایگزین می‌شوند.
+OVERWRITE_OUTPUT_FILES = True
 
 # تنظیمات هزینه محافظه‌کارانه بک‌تست کپی‌ترید.
 # چون orderbook تاریخی دقیق نداریم، هر ورود/خروج کپی‌شده با اسپرد فرضی بدتر از والت اصلی حساب می‌شود.
@@ -234,6 +255,18 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def remove_obsolete_trade_dedup_files(out_dir: Path) -> None:
+    patterns = (
+        "wallet_trade_activity_*.jsonl",
+        "edge_scores_by_*VolumeAdditions*.xlsx",
+        "edge_scores_by_sameOutcomeVolumeAdditions.xlsx",
+        "edge_scores_by_hedgedMarketCount.xlsx",
+    )
+    for pattern in patterns:
+        for path in out_dir.glob(pattern):
+            path.unlink(missing_ok=True)
 
 
 def open_csv_append(path: Path, fieldnames: list[str]):
@@ -466,22 +499,102 @@ def write_wallet_universe_csv(wallets: dict[str, WalletSeed], path: Path) -> Non
 
 def load_wallet_universe(path: Path) -> dict[str, WalletSeed]:
     wallets: dict[str, WalletSeed] = {}
-    with path.open("r", encoding="utf-8") as file:
+
+    # utf-8-sig removes a possible UTF-8 BOM from the first CSV header.
+    # Without this, the first field can become "\ufeffproxyWallet" and cause KeyError.
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
+
+        # Normalize accidental spaces around column names and validate the required field.
+        if reader.fieldnames:
+            reader.fieldnames = [str(name or "").strip() for name in reader.fieldnames]
+        if not reader.fieldnames or "proxyWallet" not in reader.fieldnames:
+            raise ValueError(
+                f"Invalid wallet universe CSV header in {path}. "
+                f"Expected 'proxyWallet'; found: {reader.fieldnames or []}"
+            )
+
         for row in reader:
-            wallet = str(row["proxyWallet"]).lower()
+            wallet = str(row.get("proxyWallet") or "").strip().lower()
+            if not wallet:
+                continue
+
             wallets[wallet] = WalletSeed(
                 proxy_wallet=wallet,
-                user_name=row.get("userName", ""),
-                x_username=row.get("xUsername", ""),
-                verified_badge=str(row.get("verifiedBadge", "")).lower() == "true",
+                user_name=str(row.get("userName") or "").strip(),
+                x_username=str(row.get("xUsername") or "").strip(),
+                verified_badge=str(row.get("verifiedBadge") or "").strip().lower() == "true",
                 best_pnl=safe_float(row.get("bestPnl")),
                 best_vol=safe_float(row.get("bestVol")),
                 profile_views=int(safe_float(row.get("profileViews"))),
                 leaderboard_hits=int(safe_float(row.get("leaderboardHits"))),
                 best_rank_seen=int(safe_float(row.get("bestRankSeen"), 10**9)),
-                modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else set(),
+                modes=(
+                    set(str(row.get("modes") or "").split("|"))
+                    if row.get("modes")
+                    else set()
+                ),
             )
+    return wallets
+
+
+def xlsx_cell_text(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.attrib.get("t", "")
+    if cell_type == "inlineStr":
+        return "".join(cell.itertext())
+    value = cell.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+    if value is None or value.text is None:
+        return ""
+    if cell_type == "s":
+        index = int(safe_float(value.text, -1))
+        return shared_strings[index] if 0 <= index < len(shared_strings) else ""
+    return value.text
+
+
+def load_xlsx_shared_strings(xlsx: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in xlsx.namelist():
+        return []
+    root = ET.fromstring(xlsx.read("xl/sharedStrings.xml"))
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    return ["".join(item.itertext()) for item in root.findall(f"{namespace}si")]
+
+
+def load_xlsx_rows(path: Path) -> list[dict[str, str]]:
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    with zipfile.ZipFile(path, "r") as xlsx:
+        shared_strings = load_xlsx_shared_strings(xlsx)
+        root = ET.fromstring(xlsx.read("xl/worksheets/sheet1.xml"))
+    sheet_rows = root.findall(f".//{namespace}row")
+    if not sheet_rows:
+        return []
+    header = [xlsx_cell_text(cell, shared_strings) for cell in sheet_rows[0].findall(f"{namespace}c")]
+    rows: list[dict[str, str]] = []
+    for sheet_row in sheet_rows[1:]:
+        cells = [xlsx_cell_text(cell, shared_strings) for cell in sheet_row.findall(f"{namespace}c")]
+        row = {field: cells[index] if index < len(cells) else "" for index, field in enumerate(header)}
+        if row.get("proxyWallet"):
+            rows.append(row)
+    return rows
+
+
+def load_wallets_from_score_xlsx(path: Path) -> dict[str, WalletSeed]:
+    wallets: dict[str, WalletSeed] = {}
+    for row in load_xlsx_rows(path):
+        wallet = str(row.get("proxyWallet") or "").lower()
+        if not wallet:
+            continue
+        wallets[wallet] = WalletSeed(
+            proxy_wallet=wallet,
+            user_name=row.get("userName", ""),
+            x_username=row.get("xUsername", ""),
+            verified_badge=str(row.get("verifiedBadge", "")).lower() in ("1", "true"),
+            best_pnl=safe_float(row.get("realizedPnlAfterCosts") or row.get("realizedPnlClosed")),
+            best_vol=safe_float(row.get("totalBoughtAfterCosts") or row.get("totalBoughtClosed")),
+            profile_views=int(safe_float(row.get("profileViews"))),
+            leaderboard_hits=int(safe_float(row.get("leaderboardHits"), 1)),
+            best_rank_seen=int(safe_float(row.get("rank"), 10**9)),
+            modes=set(str(row.get("modes", "")).split("|")) if row.get("modes") else {"oneShareNetPnlAfterCosts"},
+        )
     return wallets
 
 
@@ -569,6 +682,31 @@ def first_timestamp(pos: dict[str, Any], keys: list[str]) -> float | None:
         if timestamp is not None:
             return timestamp
     return None
+
+
+def trade_timestamp(pos: dict[str, Any]) -> float | None:
+    return first_timestamp(
+        pos,
+        [
+            "timestamp",
+            "closeTimestamp",
+            "closedAt",
+            "resolvedAt",
+            "redeemedAt",
+            "updatedAt",
+            "openTimestamp",
+            "openedAt",
+            "createdAt",
+            "created",
+        ],
+    )
+
+
+def trade_day_key(pos: dict[str, Any]) -> str:
+    timestamp = trade_timestamp(pos)
+    if timestamp is None:
+        return "unknown"
+    return datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
 
 
 def current_position_value(pos: dict[str, Any]) -> float:
@@ -677,6 +815,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     total_bought = 0.0
     total_bought_after_costs = 0.0
     one_share_net_pnl_after_costs = 0.0
+    one_share_total_cost_after_costs = 0.0
     gross_profit = 0.0
     gross_loss = 0.0
     gross_profit_after_costs = 0.0
@@ -701,11 +840,24 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
     recent_activity_count = 0
     short_hold_count = 0
     hold_duration_count = 0
+    trades_by_day: dict[str, int] = {}
+    first_trade_ts: float | None = None
+    last_trade_ts: float | None = None
     now_ts = time.time()
     recent_cutoff = now_ts - RECENT_ACTIVITY_DAYS * 24 * 60 * 60
     short_hold_seconds = SHORT_HOLD_MAX_HOURS * 60 * 60
 
     for pos in positions:
+        position_trade_ts = trade_timestamp(pos)
+        if position_trade_ts is not None:
+            first_trade_ts = (
+                position_trade_ts if first_trade_ts is None else min(first_trade_ts, position_trade_ts)
+            )
+            last_trade_ts = (
+                position_trade_ts if last_trade_ts is None else max(last_trade_ts, position_trade_ts)
+            )
+        day_key = trade_day_key(pos)
+        trades_by_day[day_key] = trades_by_day.get(day_key, 0) + 1
         pnl = safe_float(pos.get("realizedPnl"))
         costs = adjusted_position_costs(pos)
         one_share_costs = adjusted_position_costs(pos, shares_override=1.0)
@@ -714,6 +866,7 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         realized_pnl += pnl
         realized_pnl_after_costs += net_pnl
         one_share_net_pnl_after_costs += one_share_costs["netPnlAfterFeesAndSpread"]
+        one_share_total_cost_after_costs += one_share_costs["copyEntryPrice"] + one_share_costs["entryFee"]
         total_entry_fees += costs["entryFee"]
         total_exit_fees += costs["exitFee"]
         total_assumed_spread_cost += costs["shares"] * max(costs["copyEntryPrice"] - costs["walletEntryPrice"], 0.0)
@@ -776,9 +929,12 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
 
     resolved = wins + losses
     net_edge = sum_win_edge - sum_loss_risk
-    edge_rally_raw = sum_win_edge_sq / (sum_loss_risk_sq + smoothing)
-    edge_rally = edge_rally_raw * net_edge
-    net_edge_score = edge_rally
+    edge_rally_denominator = sum_loss_risk_sq if losses > 0 and sum_loss_risk_sq > 0 else smoothing
+    edge_rally_raw = sum_win_edge_sq / edge_rally_denominator
+    rally_times_net_edge = edge_rally_raw * net_edge
+    rally_times_one_share_net_pnl = edge_rally_raw * one_share_net_pnl_after_costs
+    edge_rally = rally_times_net_edge
+    net_edge_score = rally_times_net_edge
     win_rate = wins / resolved if resolved else 0.0
     avg_resolved_entry_price = sum_resolved_entry_price / resolved if resolved else 0.0
     adjusted_win_rate = wilson_lower_bound(wins, resolved) - avg_resolved_entry_price
@@ -797,6 +953,31 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         value < 0 for value in recent_balance_values
     )
     expected_payoff = realized_pnl_after_costs / resolved if resolved else 0.0
+    trading_days = len(trades_by_day)
+    average_trades_per_day = len(positions) / trading_days if trading_days else 0.0
+    max_trades_in_one_day = max(trades_by_day.values()) if trades_by_day else 0
+    days_since_last_trade = (now_ts - last_trade_ts) / (24 * 60 * 60) if last_trade_ts is not None else 0.0
+    if first_trade_ts is not None and last_trade_ts is not None:
+        first_trade_day = datetime.utcfromtimestamp(first_trade_ts).date()
+        last_trade_day = datetime.utcfromtimestamp(last_trade_ts).date()
+        calendar_trade_span_days = max((last_trade_day - first_trade_day).days + 1, 1)
+    else:
+        calendar_trade_span_days = 0
+    trades_per_calendar_day_first_to_last = (
+        len(positions) / calendar_trade_span_days if calendar_trade_span_days else 0.0
+    )
+    profit_per_trade_after_costs = realized_pnl_after_costs / len(positions) if positions else 0.0
+    profit_per_trade_times_win_rate_after_costs = profit_per_trade_after_costs * win_rate
+    profit_per_trade_times_net_edge_after_costs = profit_per_trade_after_costs * net_edge
+    profit_per_trade_times_one_share_net_pnl_after_costs = (
+        profit_per_trade_after_costs * one_share_net_pnl_after_costs
+    )
+    rally_times_net_edge_times_profit_per_trade_after_costs = (
+        rally_times_net_edge * profit_per_trade_after_costs
+    )
+    one_share_average_daily_cost_after_costs = (
+        one_share_total_cost_after_costs / trading_days if trading_days else 0.0
+    )
     if len(pnl_series) > 1:
         mean_pnl = sum(pnl_series) / len(pnl_series)
         variance = sum((pnl - mean_pnl) ** 2 for pnl in pnl_series) / (len(pnl_series) - 1)
@@ -817,10 +998,13 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "sumLossRisk": sum_loss_risk,
         "sumWinEdgeSq": sum_win_edge_sq,
         "sumLossRiskSq": sum_loss_risk_sq,
+        "edgeRallyDenominator": edge_rally_denominator,
         "netEdge": net_edge,
         "netEdgeScore": net_edge_score,
         "edgeRallyRaw": edge_rally_raw,
         "edgeRally": edge_rally,
+        "rallyTimesNetEdge": rally_times_net_edge,
+        "rallyTimesOneShareNetPnlAfterCosts": rally_times_one_share_net_pnl,
         "realizedPnlClosed": realized_pnl_after_costs,
         "realizedPnlClosedRaw": realized_pnl,
         "realizedPnlAfterCosts": realized_pnl_after_costs,
@@ -828,6 +1012,8 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "totalBoughtClosedRaw": total_bought,
         "totalBoughtAfterCosts": total_bought_after_costs,
         "oneShareNetPnlAfterCosts": one_share_net_pnl_after_costs,
+        "oneShareTotalCostAfterCosts": one_share_total_cost_after_costs,
+        "oneShareAverageDailyCostAfterCosts": one_share_average_daily_cost_after_costs,
         "roiClosed": roi_after_costs,
         "roiRaw": roi_closed,
         "roiAfterCosts": roi_after_costs,
@@ -841,6 +1027,15 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "sharpeRatio": sharpe_ratio,
         "expectedPayoff": expected_payoff,
         "expectedPayoffAfterCosts": expected_payoff,
+        "profitPerTradeAfterCosts": profit_per_trade_after_costs,
+        "profitPerTradeTimesWinRateAfterCosts": profit_per_trade_times_win_rate_after_costs,
+        "profitPerTradeTimesNetEdgeAfterCosts": profit_per_trade_times_net_edge_after_costs,
+        "profitPerTradeTimesOneShareNetPnlAfterCosts": (
+            profit_per_trade_times_one_share_net_pnl_after_costs
+        ),
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": (
+            rally_times_net_edge_times_profit_per_trade_after_costs
+        ),
         "maxConsecutiveWins": max_consecutive_wins,
         "maxConsecutiveLosses": max_consecutive_losses,
         "grossProfit": gross_profit_after_costs,
@@ -857,6 +1052,11 @@ def score_positions(positions: list[dict[str, Any]], smoothing: float = 1.0) -> 
         "assumedSpread": ASSUMED_SPREAD if USE_ASSUMED_SPREAD else 0.0,
         "assumedSpreadCost": total_assumed_spread_cost,
         "recentActivityCount": recent_activity_count,
+        "tradingDays": trading_days,
+        "averageTradesPerDay": average_trades_per_day,
+        "maxTradesInOneDay": max_trades_in_one_day,
+        "daysSinceLastTrade": days_since_last_trade,
+        "tradesPerCalendarDayFirstToLast": trades_per_calendar_day_first_to_last,
         "shortHoldCount": short_hold_count,
         "holdDurationCount": hold_duration_count,
         "shortHoldRatio": short_hold_ratio,
@@ -874,8 +1074,11 @@ def rank_wallets(
     smoothing: float,
     max_wallets: int | None,
     max_positions_per_wallet: int,
+    preserve_wallet_order: bool = False,
 ) -> None:
+    remove_obsolete_trade_dedup_files(out_dir)
     raw_path = out_dir / RAW_CLOSED_POSITIONS_LOG_FILE_NAME
+    secondary_raw_path = out_dir / SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME
     fail_path = out_dir / "closed_positions_failed.csv"
     score_path = out_dir / "edge_scores.xlsx"
     not_saved_reasons_path = out_dir / NOT_SAVED_REASONS_FILE_NAME
@@ -883,9 +1086,14 @@ def rank_wallets(
     progress_path = out_dir / "edge_scores_progress.csv"
     memory_path = out_dir / TEST_MEMORY_FILE_NAME
     page_cache_path = out_dir / CLOSED_POSITION_PAGE_CACHE_FILE_NAME
+    secondary_page_cache_path = out_dir / SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
 
-    ranked_wallets = sorted(wallets.values(), key=lambda item: item.best_pnl, reverse=True)
+    ranked_wallets = (
+        list(wallets.values())
+        if preserve_wallet_order
+        else sorted(wallets.values(), key=lambda item: item.best_pnl, reverse=True)
+    )
     if max_wallets:
         ranked_wallets = ranked_wallets[:max_wallets]
 
@@ -905,9 +1113,27 @@ def rank_wallets(
     cached_positions = load_closed_positions_cache(raw_path)
     if cached_positions:
         print(f"[resume] loaded closed-position cache for {len(cached_positions)} wallets", flush=True)
+    if USE_SECONDARY_OFFLINE_POSITION_BACKUPS:
+        secondary_cached_positions = load_closed_positions_cache(secondary_raw_path)
+        added_wallets = merge_missing_closed_positions_cache(cached_positions, secondary_cached_positions)
+        if secondary_cached_positions:
+            print(
+                f"[resume] loaded secondary closed-position cache for {len(secondary_cached_positions)} "
+                f"wallets; added {added_wallets} missing wallets",
+                flush=True,
+            )
     page_cache = load_closed_position_page_cache(page_cache_path)
     if page_cache:
         print(f"[resume] loaded page cache for {len(page_cache)} wallets", flush=True)
+    if USE_SECONDARY_OFFLINE_POSITION_BACKUPS:
+        secondary_page_cache = load_closed_position_page_cache(secondary_page_cache_path)
+        added_pages = merge_missing_closed_position_page_cache(page_cache, secondary_page_cache)
+        if secondary_page_cache:
+            print(
+                f"[resume] loaded secondary page cache for {len(secondary_page_cache)} wallets; "
+                f"added {added_pages} missing pages",
+                flush=True,
+            )
 
     fail_file, fail_writer = open_csv_append(fail_path, ["proxyWallet", "error"])
     memory_file, memory_writer = open_csv_append(
@@ -1135,6 +1361,11 @@ def mode_2_filter_reason(score: dict[str, Any]) -> str:
         return "all recent balances are negative"
     if FILTER_NEGATIVE_NET_EDGE and score["netEdge"] < 0:
         return f"netEdge {score['netEdge']} < 0"
+    if (
+        FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS
+        and score["oneShareNetPnlAfterCosts"] <= 0
+    ):
+        return f"oneShareNetPnlAfterCosts {score['oneShareNetPnlAfterCosts']} <= 0"
     if FILTER_MIN_RECOVERY_FACTOR and score["recoveryFactor"] < MIN_RECOVERY_FACTOR:
         return f"recoveryFactor {score['recoveryFactor']} < {MIN_RECOVERY_FACTOR}"
     if FILTER_NO_RECENT_7D_OPEN_OR_CLOSE and score["recentActivityCount"] <= 0:
@@ -1191,6 +1422,32 @@ def load_closed_position_page_cache(
     return cached
 
 
+def merge_missing_closed_positions_cache(
+    primary: dict[str, list[dict[str, Any]]],
+    secondary: dict[str, list[dict[str, Any]]],
+) -> int:
+    added = 0
+    for wallet, positions in secondary.items():
+        if wallet not in primary:
+            primary[wallet] = positions
+            added += 1
+    return added
+
+
+def merge_missing_closed_position_page_cache(
+    primary: dict[str, dict[int, list[dict[str, Any]]]],
+    secondary: dict[str, dict[int, list[dict[str, Any]]]],
+) -> int:
+    added = 0
+    for wallet, offsets in secondary.items():
+        primary_offsets = primary.setdefault(wallet, {})
+        for offset, rows in offsets.items():
+            if offset not in primary_offsets:
+                primary_offsets[offset] = rows
+                added += 1
+    return added
+
+
 def rewrite_closed_positions_cache(raw_path: Path, cached: dict[str, list[dict[str, Any]]]) -> None:
     with raw_path.open("w", encoding="utf-8") as file:
         for wallet, positions in cached.items():
@@ -1216,7 +1473,7 @@ def rewrite_closed_position_page_cache(
 def rewrite_wallet_universe_without_wallets(universe_path: Path, wallets_to_remove: set[str]) -> None:
     if not universe_path.exists():
         return
-    with universe_path.open("r", newline="", encoding="utf-8") as file:
+    with universe_path.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.DictReader(file)
         fieldnames = list(reader.fieldnames or [])
         rows = [
@@ -1297,9 +1554,21 @@ def get_not_saved_reason_fieldnames() -> list[str]:
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareTotalCostAfterCosts",
+        "oneShareAverageDailyCostAfterCosts",
+        "profitPerTradeAfterCosts",
+        "profitPerTradeTimesWinRateAfterCosts",
+        "profitPerTradeTimesNetEdgeAfterCosts",
+        "profitPerTradeTimesOneShareNetPnlAfterCosts",
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "netEdge",
         "recoveryFactor",
         "recentActivityCount",
+        "tradingDays",
+        "averageTradesPerDay",
+        "maxTradesInOneDay",
+        "daysSinceLastTrade",
+        "tradesPerCalendarDayFirstToLast",
         "shortHoldRatio",
         "allRecentBalancesNegative",
         "testedAt",
@@ -1323,6 +1592,8 @@ def normalize_not_saved_reason(reason: str) -> str:
         return "recoveryFactor < minimum"
     if re.match(r"netEdge .+ < 0", reason):
         return "netEdge < 0"
+    if re.match(r"oneShareNetPnlAfterCosts .+ <= 0", reason):
+        return "oneShareNetPnlAfterCosts <= 0"
     if re.match(r"resolvedPositions .+ < .+", reason):
         return "resolvedPositions < minimum"
     if re.match(r"losses .+ < .+", reason):
@@ -1365,9 +1636,25 @@ def write_not_saved_reason(
         "realizedPnlClosedRaw": score.get("realizedPnlClosedRaw", ""),
         "realizedPnlAfterCosts": score.get("realizedPnlAfterCosts", ""),
         "oneShareNetPnlAfterCosts": score.get("oneShareNetPnlAfterCosts", ""),
+        "oneShareTotalCostAfterCosts": score.get("oneShareTotalCostAfterCosts", ""),
+        "oneShareAverageDailyCostAfterCosts": score.get("oneShareAverageDailyCostAfterCosts", ""),
+        "profitPerTradeAfterCosts": score.get("profitPerTradeAfterCosts", ""),
+        "profitPerTradeTimesWinRateAfterCosts": score.get("profitPerTradeTimesWinRateAfterCosts", ""),
+        "profitPerTradeTimesNetEdgeAfterCosts": score.get("profitPerTradeTimesNetEdgeAfterCosts", ""),
+        "profitPerTradeTimesOneShareNetPnlAfterCosts": score.get(
+            "profitPerTradeTimesOneShareNetPnlAfterCosts", ""
+        ),
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts": score.get(
+            "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", ""
+        ),
         "netEdge": score.get("netEdge", ""),
         "recoveryFactor": score.get("recoveryFactor", ""),
         "recentActivityCount": score.get("recentActivityCount", ""),
+        "tradingDays": score.get("tradingDays", ""),
+        "averageTradesPerDay": score.get("averageTradesPerDay", ""),
+        "maxTradesInOneDay": score.get("maxTradesInOneDay", ""),
+        "daysSinceLastTrade": score.get("daysSinceLastTrade", ""),
+        "tradesPerCalendarDayFirstToLast": score.get("tradesPerCalendarDayFirstToLast", ""),
         "shortHoldRatio": score.get("shortHoldRatio", ""),
         "allRecentBalancesNegative": score.get("allRecentBalancesNegative", ""),
         "testedAt": int(time.time()),
@@ -1415,6 +1702,8 @@ def sorted_score_rows(rows: Any) -> list[dict[str, Any]]:
 
 
 def write_sorted_scores_csv(rows: Any, path: Path, fieldnames: list[str]) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     score_rows = sorted_score_rows(rows)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -1432,6 +1721,8 @@ def sorted_rows_by_factor(rows: Any, factor: str, descending: bool = True) -> li
 
 
 def write_scores_csv(rows: Any, path: Path, fieldnames: list[str], sort_factor: str, descending: bool) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     score_rows = sorted_rows_by_factor(rows, sort_factor, descending)
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -1446,10 +1737,19 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
     factors = [
         ("netEdge", True),
         ("netEdgeScore", True),
+        ("rallyTimesNetEdge", True),
+        ("rallyTimesOneShareNetPnlAfterCosts", True),
         ("adjustedWinRate", True),
         ("winRate", True),
         ("realizedPnlAfterCosts", True),
         ("oneShareNetPnlAfterCosts", True),
+        ("oneShareTotalCostAfterCosts", False),
+        ("oneShareAverageDailyCostAfterCosts", False),
+        ("profitPerTradeAfterCosts", True),
+        ("profitPerTradeTimesWinRateAfterCosts", True),
+        ("profitPerTradeTimesNetEdgeAfterCosts", True),
+        ("profitPerTradeTimesOneShareNetPnlAfterCosts", True),
+        ("rallyTimesNetEdgeTimesProfitPerTradeAfterCosts", True),
         ("roiAfterCosts", True),
         ("maxDrawdown", False),
         ("profitFactorAfterCosts", True),
@@ -1457,6 +1757,10 @@ def write_factor_result_files(rows: Any, out_dir: Path, fieldnames: list[str]) -
         ("netEdgeToMaxDrawdown", True),
         ("sharpeRatio", True),
         ("expectedPayoffAfterCosts", True),
+        ("averageTradesPerDay", True),
+        ("maxTradesInOneDay", True),
+        ("daysSinceLastTrade", False),
+        ("tradesPerCalendarDayFirstToLast", True),
         ("shortHoldRatio", False),
         ("profileViews", True),
     ]
@@ -1514,6 +1818,8 @@ def write_scores_xlsx(
 
 
 def write_table_xlsx(rows: Any, path: Path, fieldnames: list[str], sheet_name: str) -> None:
+    if path.exists() and not OVERWRITE_OUTPUT_FILES:
+        return
     all_rows = [fieldnames]
     for rank, row in enumerate(rows, start=1):
         row = dict(row)
@@ -1570,10 +1876,15 @@ def get_score_fieldnames() -> list[str]:
         "wins",
         "losses",
         "breakeven",
+        "averageTradesPerDay",
+        "maxTradesInOneDay",
+        "daysSinceLastTrade",
+        "tradesPerCalendarDayFirstToLast",
         "sumWinEdge",
         "sumLossRisk",
         "sumWinEdgeSq",
         "sumLossRiskSq",
+        "edgeRallyDenominator",
         "realizedPnlClosed",
         "realizedPnlClosedRaw",
         "realizedPnlAfterCosts",
@@ -1581,6 +1892,13 @@ def get_score_fieldnames() -> list[str]:
         "totalBoughtClosedRaw",
         "totalBoughtAfterCosts",
         "oneShareNetPnlAfterCosts",
+        "oneShareTotalCostAfterCosts",
+        "oneShareAverageDailyCostAfterCosts",
+        "profitPerTradeAfterCosts",
+        "profitPerTradeTimesWinRateAfterCosts",
+        "profitPerTradeTimesNetEdgeAfterCosts",
+        "profitPerTradeTimesOneShareNetPnlAfterCosts",
+        "rallyTimesNetEdgeTimesProfitPerTradeAfterCosts",
         "roiClosed",
         "roiRaw",
         "roiAfterCosts",
@@ -1610,12 +1928,15 @@ def get_score_fieldnames() -> list[str]:
         "entryFee",
         "exitFee",
         "recentActivityCount",
+        "tradingDays",
         "shortHoldCount",
         "holdDurationCount",
         "shortHoldRatio",
         "allRecentBalancesNegative",
         "edgeRally",
         "edgeRallyRaw",
+        "rallyTimesNetEdge",
+        "rallyTimesOneShareNetPnlAfterCosts",
         "bestPnlLeaderboard",
         "bestVolLeaderboard",
         "profileViews",
@@ -1713,18 +2034,34 @@ def print_active_settings(
             "[mode 2 filters] "
             f"all_recent_balances_negative={FILTER_ALL_RECENT_BALANCES_NEGATIVE} "
             f"negative_net_edge={FILTER_NEGATIVE_NET_EDGE} "
+            f"non_positive_one_share_net_pnl_after_costs="
+            f"{FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS} "
             f"min_recovery_factor={FILTER_MIN_RECOVERY_FACTOR}:{MIN_RECOVERY_FACTOR} "
             f"recent_activity_days={FILTER_NO_RECENT_7D_OPEN_OR_CLOSE}:{RECENT_ACTIVITY_DAYS} "
             f"short_hold={FILTER_SHORT_HOLD_RATIO}:{MAX_SHORT_HOLD_RATIO}/{SHORT_HOLD_MAX_HOURS}h "
             f"purge_position_jsonl={PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS} "
             f"purge_wallet_universe={PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE} "
             f"live_all_result_files={UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET} "
-            f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET}"
+            f"live_progress_csv={UPDATE_PROGRESS_CSV_AFTER_EACH_WALLET} "
+            f"overwrite_outputs={OVERWRITE_OUTPUT_FILES}"
+        )
+        print(
+            "[mode 2 input] "
+            f"use_one_share_ranking_input={USE_ONE_SHARE_RANKING_INPUT} "
+            f"file={ONE_SHARE_RANKING_INPUT_FILE_NAME}"
+        )
+        print(
+            "[offline fallback] "
+            f"use_secondary_backups={USE_SECONDARY_OFFLINE_POSITION_BACKUPS} "
+            f"raw={SECONDARY_RAW_CLOSED_POSITIONS_LOG_FILE_NAME} "
+            f"pages={SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME}"
         )
         print(f"[memory] {TEST_MEMORY_FILE_NAME} controls resume; delete it to restart scoring")
         print(f"[not saved reasons] {NOT_SAVED_REASONS_FILE_NAME} shows why wallets did not enter score files")
         print(f"[not saved reason stats] {NOT_SAVED_REASON_STATS_FILE_NAME} counts repeated removal reasons")
-        print(f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}")
+        print(
+            f"[raw data] keep {RAW_CLOSED_POSITIONS_LOG_FILE_NAME} and {CLOSED_POSITION_PAGE_CACHE_FILE_NAME}"
+        )
         print("[live output] edge_scores_progress.csv updates during scoring")
         print("[final output] edge_scores.xlsx and edge_scores_by_<factor>.xlsx are sorted after scoring finishes")
     print("")
@@ -1764,11 +2101,24 @@ def main() -> int:
     client = PolymarketClient(delay=delay, timeout=timeout, retries=retries)
 
     universe_path = out_dir / "wallet_universe.csv"
+    one_share_input_path = out_dir / ONE_SHARE_RANKING_INPUT_FILE_NAME
+    preserve_wallet_order = False
     if mode == 2:
-        if not universe_path.exists():
-            print(f"Missing {universe_path}. Run mode 1 first.", file=sys.stderr)
-            return 2
-        wallets = load_wallet_universe(universe_path)
+        if USE_ONE_SHARE_RANKING_INPUT:
+            if not one_share_input_path.exists():
+                print(
+                    f"Missing {one_share_input_path}. Rename edge_scores_by_oneShareNetPnlAfterCosts.xlsx "
+                    f"to {ONE_SHARE_RANKING_INPUT_FILE_NAME} or set USE_ONE_SHARE_RANKING_INPUT = False.",
+                    file=sys.stderr,
+                )
+                return 2
+            wallets = load_wallets_from_score_xlsx(one_share_input_path)
+            preserve_wallet_order = True
+        else:
+            if not universe_path.exists():
+                print(f"Missing {universe_path}. Run mode 1 first.", file=sys.stderr)
+                return 2
+            wallets = load_wallet_universe(universe_path)
     else:
         wallets = collect_leaderboard_universe(
             client=client,
@@ -1791,6 +2141,7 @@ def main() -> int:
         smoothing=smoothing,
         max_wallets=max_wallets,
         max_positions_per_wallet=max_positions_per_wallet,
+        preserve_wallet_order=preserve_wallet_order,
     )
     print(f"[done] results: {out_dir / 'edge_scores.xlsx'}", flush=True)
     return 0
