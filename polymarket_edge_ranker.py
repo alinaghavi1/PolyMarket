@@ -85,6 +85,9 @@ BASE_URL = "https://data-api.polymarket.com"
 #   2 = تست کردن والت‌های استخراج‌شده و محاسبه Edge Rally × Net Edge Score
 RUN_MODE = 2
 
+# شناسه نسخه برای اینکه معلوم باشد دقیقاً همین فایل جدید اجرا شده است.
+BUILD_ID = "global-queue-best-polymarket-vpns-v8-cpu-autotune"
+
 # پوشه خروجی. برای اینکه مود 2 بتواند خروجی مود 1 را بخواند، بین دو مود تغییرش نده.
 OUT_DIR = "polymarket_edge_output"
 
@@ -197,10 +200,10 @@ SMOOTHING = 1.0
 FILTER_ALL_RECENT_BALANCES_NEGATIVE = False
 
 # فیلتر Net Edge منفی؛ اگر روشن باشد والت‌هایی که نت اج منفی دارند حذف می‌شوند.
-FILTER_NEGATIVE_NET_EDGE = True
+FILTER_NEGATIVE_NET_EDGE = False
 
 # فیلتر سود یک‌سهمی غیرمثبت؛ اگر روشن باشد والت‌هایی که oneShareNetPnlAfterCosts آن‌ها منفی یا صفر است حذف می‌شوند.
-FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS = True
+FILTER_NON_POSITIVE_ONE_SHARE_NET_PNL_AFTER_COSTS = False
 
 # فیلتر حداقل Recovery Factor؛ اگر روشن باشد والت‌هایی که کمتر از مقدار زیر باشند حذف می‌شوند.
 FILTER_MIN_RECOVERY_FACTOR = False
@@ -209,7 +212,7 @@ FILTER_MIN_RECOVERY_FACTOR = False
 MIN_RECOVERY_FACTOR = 5
 
 # فیلتر فعالیت ۷ روز اخیر؛ اگر روشن باشد والت بدون معامله باز/بسته‌شده در ۷ روز اخیر حذف می‌شود.
-FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = True
+FILTER_NO_RECENT_7D_OPEN_OR_CLOSE = False
 
 # تعداد روز برای فیلتر فعالیت اخیر.
 RECENT_ACTIVITY_DAYS = 20
@@ -227,7 +230,7 @@ SHORT_HOLD_MAX_HOURS = 24.0
 PURGE_FILTERED_WALLETS_FROM_POSITION_BACKUPS = False
 
 # حذف همزمان والت‌های فیلترشده از فایل wallet_universe.csv؛ پیش‌فرض خاموش است تا لیست اولیه دست‌نخورده بماند.
-PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = True
+PURGE_FILTERED_WALLETS_FROM_WALLET_UNIVERSE = False
 
 # آپدیت همه فایل‌های آماری بعد از اسکن هر والت؛ خروجی‌ها را زنده نگه می‌دارد ولی کندتر است.
 UPDATE_ALL_RESULT_FILES_AFTER_EACH_WALLET = False
@@ -338,6 +341,48 @@ VLESS_CHECK_OUTBOUND_IP = True
 VLESS_REQUIRE_UNIQUE_OUTBOUND_IPS = True
 VLESS_IP_CHECK_URL = "https://api.ipify.org"
 VLESS_START_TIMEOUT_SECONDS = 15.0
+
+# این سه تنظیم داخل خود کد هستند.
+# برای تغییرشان برنامه را با Ctrl+C ببند، عددها را عوض کن و دوباره اجرا کن.
+# صف جهانی، والت‌های کامل‌شده و Cacheها از همان‌جا ادامه پیدا می‌کنند.
+VPN_STARTUP_TEST_WORKERS = 15
+
+# نقطه شروع کنترل خودکار CPU. هر دو مقدار در زمان اجرا همیشه با هم و به اندازه 1
+# کم یا زیاد می‌شوند؛ تغییر خودکار فقط بعد از پایان تست اولیه VPNها شروع می‌شود.
+VPN_MAX_ACTIVE_NODES = 4
+VPN_DEAD_RECHECK_WORKERS = 4
+
+# کنترل خودکار ظرفیت بر اساس بیشترین مصرف CPU در هر پنجره یک‌دقیقه‌ای.
+CPU_AUTO_TUNE_ENABLED = True
+CPU_AUTO_TUNE_LIMIT_PERCENT = 65.0
+CPU_AUTO_TUNE_WINDOW_SECONDS = 60.0
+CPU_AUTO_TUNE_SAMPLE_INTERVAL_SECONDS = 1.0
+CPU_AUTO_TUNE_MIN_PARALLELISM = 1
+# صفر یعنی سقف برابر تعداد کل کانفیگ‌های قابل‌استفاده باشد.
+CPU_AUTO_TUNE_MAX_PARALLELISM = 0
+# هنگام کاهش ظرفیت، یک Worker اضافی همان لحظه متوقف می‌شود و والت ناتمام
+# بدون از دست رفتن حافظه‌های ذخیره‌شده دوباره به صف جهانی برمی‌گردد.
+CPU_AUTO_TUNE_IMMEDIATE_SCALE_DOWN = True
+
+# پیشرفت تست اولیه بعد از چند نتیجه در CMD تازه شود. 1 یعنی از 1/کل نمایش داده می‌شود.
+VPN_STARTUP_PROGRESS_EVERY = 1
+
+# رتبه‌بندی VPNها با درخواست واقعی به Data API پلی‌مارکت.
+# در پایان تست اولیه، VPNهای سالم بر اساس این زمان و پایداری مرتب می‌شوند و
+# VPN_MAX_ACTIVE_NODES مورد اول برای استخراج انتخاب می‌شوند.
+VPN_SPEED_RANKING_ENABLED = True
+VPN_SPEED_TEST_URL = (
+    f"{BASE_URL}/v1/leaderboard"
+    "?category=OVERALL&timePeriod=DAY&orderBy=PNL&limit=1&offset=0"
+)
+
+# تعداد درخواست‌های بنچمارک برای هر VPN. حداقل یک موفقیت برای سالم بودن کافی است.
+VPN_SPEED_TEST_ATTEMPTS = 2
+VPN_SPEED_TEST_TIMEOUT_SECONDS = 12.0
+
+# برای هر درخواست ناموفق این مقدار به امتیاز سرعت اضافه می‌شود؛
+# بنابراین VPN سریع ولی ناپایدار پایین‌تر از VPN کمی کندتر و پایدار قرار می‌گیرد.
+VPN_SPEED_FAILURE_PENALTY_MS = 5000.0
 
 # پس از پایان همه shardها خروجی آماری نهایی به‌صورت خودکار ادغام می‌شود.
 VLESS_AUTO_MERGE_OUTPUTS = True
@@ -452,7 +497,11 @@ def _looks_like_error(message: str) -> bool:
 
 
 class RunLogRouter:
-    """Thread-safe timestamped master/error logs plus a new-error counter."""
+    """Thread-safe logs.
+
+    all_logs.txt is the complete master log and always includes errors.
+    errors.txt is only a filtered copy of error lines.
+    """
 
     def __init__(self, all_log_path: Path, error_log_path: Path) -> None:
         ensure_dir(all_log_path.parent)
@@ -5141,6 +5190,192 @@ GLOBAL_QUEUE_MERGE_RAW_JSONL = False
 ACTIVE_VPN_FILE_NAME = "active_vpns.txt"
 ACTIVE_VPN_UPDATE_INTERVAL_SECONDS = 10.0
 
+# این فایل فقط یک‌بار، بلافاصله بعد از پایان تست اولیه VPNها ساخته می‌شود.
+# محل آن کنار خود فایل پایتون است، نه داخل پوشه خروجی.
+# همه VPNهای سالم و دارای IP یکتا را بر اساس بهترین عملکرد Polymarket
+# مرتب می‌کند و تا پایان همان اجرای برنامه دیگر هرگز ویرایش نمی‌شود.
+STARTUP_SORTED_VPN_SNAPSHOT_FILE_NAME = "active_vpns_startup_sorted.txt"
+
+
+class SystemCpuUsageSampler:
+    """Dependency-free total-system CPU sampler for Windows and Linux."""
+
+    def __init__(self) -> None:
+        self._mode = ""
+        self._last_idle = 0
+        self._last_total = 0
+        self._windows_get_system_times = None
+        self._windows_filetime_type = None
+
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                class FILETIME(ctypes.Structure):
+                    _fields_ = [
+                        ("dwLowDateTime", ctypes.c_uint32),
+                        ("dwHighDateTime", ctypes.c_uint32),
+                    ]
+
+                get_system_times = ctypes.windll.kernel32.GetSystemTimes
+                get_system_times.argtypes = [
+                    ctypes.POINTER(FILETIME),
+                    ctypes.POINTER(FILETIME),
+                    ctypes.POINTER(FILETIME),
+                ]
+                get_system_times.restype = ctypes.c_int
+                self._windows_get_system_times = get_system_times
+                self._windows_filetime_type = FILETIME
+                self._mode = "windows"
+            except Exception:
+                self._mode = ""
+
+        if not self._mode and Path("/proc/stat").exists():
+            self._mode = "proc"
+
+        counters = self._read_counters()
+        if counters is not None:
+            self._last_idle, self._last_total = counters
+
+    @property
+    def available(self) -> bool:
+        return bool(self._mode)
+
+    @staticmethod
+    def _filetime_value(value: Any) -> int:
+        return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+    def _read_counters(self) -> tuple[int, int] | None:
+        if self._mode == "windows":
+            try:
+                import ctypes
+
+                filetime_type = self._windows_filetime_type
+                get_system_times = self._windows_get_system_times
+                if filetime_type is None or get_system_times is None:
+                    return None
+                idle = filetime_type()
+                kernel = filetime_type()
+                user = filetime_type()
+                if not get_system_times(
+                    ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)
+                ):
+                    return None
+                idle_value = self._filetime_value(idle)
+                total_value = self._filetime_value(kernel) + self._filetime_value(user)
+                return idle_value, total_value
+            except Exception:
+                return None
+
+        if self._mode == "proc":
+            try:
+                first_line = Path("/proc/stat").read_text(
+                    encoding="utf-8"
+                ).splitlines()[0]
+                values = [int(value) for value in first_line.split()[1:]]
+                if len(values) < 4:
+                    return None
+                idle_value = values[3] + (values[4] if len(values) > 4 else 0)
+                return idle_value, sum(values)
+            except Exception:
+                return None
+
+        return None
+
+    def sample_percent(self) -> float | None:
+        counters = self._read_counters()
+        if counters is None:
+            return None
+        idle, total = counters
+        idle_delta = idle - self._last_idle
+        total_delta = total - self._last_total
+        self._last_idle, self._last_total = idle, total
+        if total_delta <= 0:
+            return None
+        busy_delta = max(total_delta - idle_delta, 0)
+        return min(max(busy_delta / total_delta * 100.0, 0.0), 100.0)
+
+
+class CpuPeakMonitor:
+    """Samples CPU in the background and preserves one-minute peak usage."""
+
+    def __init__(self, sample_interval_seconds: float = 1.0) -> None:
+        self.sample_interval_seconds = max(float(sample_interval_seconds), 0.2)
+        self.sampler = SystemCpuUsageSampler()
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._current = 0.0
+        self._window_peak = 0.0
+        self._window_sum = 0.0
+        self._window_samples = 0
+        self._all_time_peak = 0.0
+
+    @property
+    def available(self) -> bool:
+        return self.sampler.available
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="cpu-peak-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.sample_interval_seconds):
+            value = self.sampler.sample_percent()
+            if value is None:
+                continue
+            with self._lock:
+                self._current = value
+                self._window_peak = max(self._window_peak, value)
+                self._window_sum += value
+                self._window_samples += 1
+                self._all_time_peak = max(self._all_time_peak, value)
+
+    def snapshot(self) -> dict[str, float | int]:
+        with self._lock:
+            average = (
+                self._window_sum / self._window_samples
+                if self._window_samples
+                else 0.0
+            )
+            return {
+                "current": self._current,
+                "window_peak": self._window_peak,
+                "window_average": average,
+                "window_samples": self._window_samples,
+                "all_time_peak": self._all_time_peak,
+            }
+
+    def consume_window(self) -> dict[str, float | int]:
+        with self._lock:
+            average = (
+                self._window_sum / self._window_samples
+                if self._window_samples
+                else 0.0
+            )
+            result = {
+                "current": self._current,
+                "window_peak": self._window_peak,
+                "window_average": average,
+                "window_samples": self._window_samples,
+                "all_time_peak": self._all_time_peak,
+            }
+            self._window_peak = 0.0
+            self._window_sum = 0.0
+            self._window_samples = 0
+            return result
+
 
 def _seed_to_json(seed: WalletSeed) -> str:
     return json.dumps(
@@ -5568,22 +5803,90 @@ def _import_old_state(queue: GlobalQueueState, root: Path, fallback: Path | None
     return sources
 
 
-def _write_active_vpn_file(root: Path, nodes: list[dict[str, Any]]) -> None:
-    healthy = [node for node in nodes if node.get("healthy")]
+def _vpn_rank_key(node: dict[str, Any]) -> tuple[float, int, int]:
+    speed_score = safe_float(node.get("speed_score_ms"), float("inf"))
+    failures = int(node.get("speed_failures", 0) or 0)
+    source_index = int(node.get("source_index", 0) or 0)
+    return speed_score, failures, source_index
+
+
+def _write_startup_sorted_vpn_snapshot(
+    script_dir: Path,
+    nodes: list[dict[str, Any]],
+) -> Path:
+    """Write one immutable-per-run snapshot of startup-working VPN links.
+
+    The caller invokes this exactly once after startup testing and duplicate-IP
+    elimination. The normal dynamic active_vpns.txt remains unchanged and can
+    continue to reflect recoveries/failures during the run.
+    """
+    usable = sorted(
+        [
+            node
+            for node in nodes
+            if (node.get("healthy") or node.get("standby"))
+            and str(node.get("link") or "").strip()
+        ],
+        key=_vpn_rank_key,
+    )
+
     lines = [
-        f"Updated: {_log_timestamp()}",
-        f"Active VPNs: {len(healthy)}/{len(nodes)}",
+        "# Generated once after the initial VPN test.",
+        "# Sorted from best to worst by Polymarket speed score.",
+        "# This file is not edited again until the program is started another time.",
+        f"# Working unique VPNs: {len(usable)}",
         "",
     ]
-    for index, node in enumerate(healthy, start=1):
+    lines.extend(str(node["link"]).strip() for node in usable)
+
+    snapshot_path = script_dir / STARTUP_SORTED_VPN_SNAPSHOT_FILE_NAME
+    _atomic_write_text(snapshot_path, "\n".join(lines) + "\n")
+    return snapshot_path
+
+
+def _write_active_vpn_file(root: Path, nodes: list[dict[str, Any]]) -> None:
+    # Every currently usable VPN is written:
+    # ACTIVE  = Xray is running and may have a wallet batch.
+    # STANDBY = it passed the Polymarket speed test but Xray is parked.
+    active = [node for node in nodes if node.get("healthy")]
+    standby = [node for node in nodes if node.get("standby")]
+    usable = sorted(active + standby, key=_vpn_rank_key)
+    unavailable_count = max(0, len(nodes) - len(usable))
+
+    lines = [
+        f"Updated: {_log_timestamp()}",
+        f"Total configurations: {len(nodes)}",
+        f"Working VPNs: {len(usable)}",
+        f"Currently active/running: {len(active)}",
+        f"Working standby: {len(standby)}",
+        f"Unavailable/duplicate/not-yet-recovered: {unavailable_count}",
+        "Ranking: lower Polymarket score_ms is better; failures receive a penalty.",
+        "",
+    ]
+
+    for rank, node in enumerate(usable, start=1):
+        is_active = bool(node.get("healthy"))
+        status = "ACTIVE" if is_active else "STANDBY"
         busy = node.get("busy_batch") or "idle"
+        xray_state = "running" if is_active else "stopped"
+        score = safe_float(node.get("speed_score_ms"), float("inf"))
+        avg_ms = safe_float(node.get("speed_avg_ms"), float("inf"))
+        score_text = f"{score:.1f}" if math.isfinite(score) else "unknown"
+        avg_text = f"{avg_ms:.1f}" if math.isfinite(avg_ms) else "unknown"
         lines.append(
-            f"{index}. node={node.get('source_index')} protocol={node.get('protocol')} "
-            f"name={node.get('name')} ip={node.get('ip')} local_port={node.get('port')} "
-            f"work={busy}"
+            f"{rank}. status={status} node={node.get('source_index')} "
+            f"protocol={node.get('protocol')} name={node.get('name')} "
+            f"ip={node.get('ip')} score_ms={score_text} avg_ms={avg_text} "
+            f"speed_ok={int(node.get('speed_successes', 0) or 0)} "
+            f"speed_fail={int(node.get('speed_failures', 0) or 0)} "
+            f"local_port={node.get('port')} xray={xray_state} work={busy}"
         )
-    if not healthy:
-        lines.append("No active VPN. Dead/startup-failed nodes are still rechecked periodically.")
+
+    if not usable:
+        lines.append(
+            "No working VPN is available yet. Failed nodes are still rechecked periodically."
+        )
+
     _atomic_write_text(root / ACTIVE_VPN_FILE_NAME, "\n".join(lines) + "\n")
 
 
@@ -5687,7 +5990,16 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
     console_stderr = sys.stderr
     logger = RunLogRouter(root / ALL_LOG_FILE_NAME, root / ERROR_LOG_FILE_NAME)
     logger.log(
+        f"[build] id={BUILD_ID} script={Path(__file__).resolve()}",
+        source="SYSTEM",
+    )
+    logger.log(
         f"[vpn-list] file={vpn_file} parsed_links={len(links)}",
+        source="SYSTEM",
+    )
+    logger.log(
+        f"[logging] all_logs={root / ALL_LOG_FILE_NAME} contains all normal lines and all errors; "
+        f"errors={root / ERROR_LOG_FILE_NAME} is the error-only subset",
         source="SYSTEM",
     )
     if CLEAN_CONSOLE_DASHBOARD:
@@ -5715,8 +6027,17 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         source="SYSTEM",
     )
     console_stdout.write(
-        f"Global queue ready. Logs: {root / ALL_LOG_FILE_NAME} | "
+        f"Global queue ready. Build: {BUILD_ID} | "
+        f"Logs: {root / ALL_LOG_FILE_NAME} | "
         f"Errors: {root / ERROR_LOG_FILE_NAME} | Active VPNs: {root / ACTIVE_VPN_FILE_NAME}\n"
+    )
+    console_stdout.write(
+        f"Startup settings: VPN test workers={VPN_STARTUP_TEST_WORKERS} | "
+        f"max active VPNs={VPN_MAX_ACTIVE_NODES} | "
+        f"dead recheck workers={VPN_DEAD_RECHECK_WORKERS} | "
+        f"CPU auto tune={'ON' if CPU_AUTO_TUNE_ENABLED else 'OFF'} "
+        f"(1m peak limit={CPU_AUTO_TUNE_LIMIT_PERCENT:.1f}%) | "
+        f"Polymarket speed ranking={'ON' if VPN_SPEED_RANKING_ENABLED else 'OFF'}\n"
     )
     console_stdout.flush()
 
@@ -5730,6 +6051,26 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
     last_error_notice = time.monotonic()
     last_active_file = 0.0
     last_console_width = 0
+
+    # Runtime values always move together. The source-code settings above remain
+    # the starting point for every new program run.
+    cpu_parallelism = max(
+        int(CPU_AUTO_TUNE_MIN_PARALLELISM),
+        min(int(VPN_MAX_ACTIVE_NODES), int(VPN_DEAD_RECHECK_WORKERS)),
+    )
+    cpu_parallelism_cap = (
+        max(
+            int(CPU_AUTO_TUNE_MIN_PARALLELISM),
+            int(CPU_AUTO_TUNE_MAX_PARALLELISM),
+        )
+        if int(CPU_AUTO_TUNE_MAX_PARALLELISM) > 0
+        else max(len(links), int(CPU_AUTO_TUNE_MIN_PARALLELISM))
+    )
+    cpu_monitor = CpuPeakMonitor(CPU_AUTO_TUNE_SAMPLE_INTERVAL_SECONDS)
+    next_cpu_tune = 0.0
+    last_cpu_window_peak = 0.0
+    last_cpu_window_average = 0.0
+    last_cpu_all_time_peak = 0.0
 
     def console_line(text: str, newline: bool = False) -> None:
         nonlocal last_console_width
@@ -5758,10 +6099,19 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             return
         counts = queue.counts()
         active = sum(1 for node in nodes if node.get("healthy"))
+        standby = sum(1 for node in nodes if node.get("standby"))
         percent = counts["done"] / counts["total"] * 100.0 if counts["total"] else 100.0
+        cpu_state = cpu_monitor.snapshot()
+        cpu_current = safe_float(cpu_state.get("current"))
+        cpu_peak = max(
+            safe_float(cpu_state.get("window_peak")),
+            last_cpu_window_peak,
+        )
         console_line(
             f"[{datetime.now().strftime('%H:%M:%S')}] "
-            f"VPN Active: {active}/{len(nodes)} | "
+            f"VPN Active: {active}/{len(nodes)} | Standby: {standby} | "
+            f"Limit: {cpu_parallelism} | "
+            f"CPU: {cpu_current:.1f}% / 1m max {cpu_peak:.1f}% | "
             f"Wallets: {counts['done']}/{counts['total']} | "
             f"Done: {percent:.2f}% | Running: {counts['running']} | Pending: {counts['pending']}"
         )
@@ -5785,17 +6135,82 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             console_stdout.flush()
             show_dashboard(force=True)
 
-    def start_or_restart_node(node: dict[str, Any]) -> tuple[bool, str]:
-        old_proc = node.get("xray_proc")
-        if old_proc is not None:
-            queue.unregister_pid(getattr(old_proc, "pid", None))
-            stop_process(old_proc)
-        old_handle = node.get("xray_handle")
-        if old_handle is not None:
+    def stop_node_xray(node: dict[str, Any]) -> None:
+        proc = node.get("xray_proc")
+        if proc is not None:
+            queue.unregister_pid(getattr(proc, "pid", None))
+            stop_process(proc)
+        handle = node.get("xray_handle")
+        if handle is not None:
             try:
-                old_handle.close()
+                handle.close()
             except Exception:
                 pass
+        node["xray_proc"] = None
+        node["xray_handle"] = None
+
+    def park_node(node: dict[str, Any]) -> None:
+        """Stop Xray but keep the successfully tested node available as standby."""
+        stop_node_xray(node)
+        node["healthy"] = False
+        node["standby"] = True
+        node["health_failures"] = 0
+        node["last_error"] = ""
+        node["next_recheck"] = 0.0
+
+    def benchmark_polymarket_proxy(node: dict[str, Any]) -> None:
+        if not VPN_SPEED_RANKING_ENABLED:
+            node["speed_avg_ms"] = float(node.get("speed_avg_ms", 0.0) or 0.0)
+            node["speed_score_ms"] = float(node.get("speed_score_ms", 0.0) or 0.0)
+            node["speed_successes"] = 0
+            node["speed_failures"] = 0
+            return
+
+        attempts = max(1, int(VPN_SPEED_TEST_ATTEMPTS))
+        durations_ms: list[float] = []
+        failures = 0
+        last_error = ""
+
+        for _ in range(attempts):
+            started = time.perf_counter()
+            try:
+                proxy_text_request(
+                    str(node["proxy"]),
+                    VPN_SPEED_TEST_URL,
+                    timeout=float(VPN_SPEED_TEST_TIMEOUT_SECONDS),
+                )
+                durations_ms.append((time.perf_counter() - started) * 1000.0)
+            except Exception as exc:
+                failures += 1
+                last_error = repr(exc)
+
+        if not durations_ms:
+            raise RuntimeError(
+                f"Polymarket speed test failed {failures}/{attempts}: {last_error}"
+            )
+
+        average_ms = sum(durations_ms) / len(durations_ms)
+        score_ms = average_ms + failures * float(VPN_SPEED_FAILURE_PENALTY_MS)
+        node["speed_avg_ms"] = average_ms
+        node["speed_score_ms"] = score_ms
+        node["speed_successes"] = len(durations_ms)
+        node["speed_failures"] = failures
+        node["speed_tested_at"] = _log_timestamp()
+
+    def start_or_restart_node(
+        node: dict[str, Any],
+        enforce_unique_ip: bool = True,
+        run_speed_test: bool = False,
+    ) -> tuple[bool, str]:
+        # Important: proc/handle must be cleaned even when the outbound-IP request
+        # raises Timeout/SSL/Connection errors. Without this cleanup, failed tests
+        # leave orphan Xray processes running and eventually exhaust Windows commit
+        # memory/pagefile.
+        stop_node_xray(node)
+        node["standby"] = False
+        proc: subprocess.Popen | None = None
+        handle: Any = None
+        registered_pid = False
         try:
             proc, handle = start_xray_node(
                 xray_path,
@@ -5806,40 +6221,67 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                 source=f"XRAY{node['source_index']}",
             )
             queue.register_pid(proc.pid, "xray")
+            registered_pid = True
+
             proxy_url = str(node["proxy"])
             outbound_ip = (
-                proxy_text_request(proxy_url, VLESS_IP_CHECK_URL, timeout=PROXY_HEALTH_CHECK_TIMEOUT_SECONDS)
+                proxy_text_request(
+                    proxy_url,
+                    VLESS_IP_CHECK_URL,
+                    timeout=PROXY_HEALTH_CHECK_TIMEOUT_SECONDS,
+                )
                 if VLESS_CHECK_OUTBOUND_IP and not args.skip_ip_check
                 else f"unchecked-{node['source_index']}"
             )
+
+            if run_speed_test or not math.isfinite(
+                safe_float(node.get("speed_score_ms"), float("inf"))
+            ):
+                benchmark_polymarket_proxy(node)
+
             duplicate = any(
                 other is not node
                 and other.get("healthy")
                 and other.get("ip") == outbound_ip
                 for other in nodes
             )
-            if duplicate and VLESS_REQUIRE_UNIQUE_OUTBOUND_IPS:
-                queue.unregister_pid(proc.pid)
-                stop_process(proc)
-                try:
-                    handle.close()
-                except Exception:
-                    pass
-                return False, f"duplicate outbound IP {outbound_ip}"
+            if enforce_unique_ip and duplicate and VLESS_REQUIRE_UNIQUE_OUTBOUND_IPS:
+                raise RuntimeError(f"duplicate outbound IP {outbound_ip}")
+
             node["xray_proc"] = proc
             node["xray_handle"] = handle
             node["ip"] = outbound_ip
             node["healthy"] = True
+            node["standby"] = False
             node["health_failures"] = 0
             node["last_error"] = ""
             node["next_recheck"] = 0.0
             return True, ""
+
         except Exception as exc:
+            # Clean every partially-started Xray before marking the node failed.
+            if proc is not None:
+                if registered_pid:
+                    try:
+                        queue.unregister_pid(proc.pid)
+                    except Exception:
+                        pass
+                stop_process(proc)
+
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
             node["xray_proc"] = None
             node["xray_handle"] = None
             node["healthy"] = False
+            node["standby"] = False
             node["last_error"] = repr(exc)
-            node["next_recheck"] = time.monotonic() + PROXY_DEAD_RECHECK_INTERVAL_SECONDS
+            node["next_recheck"] = (
+                time.monotonic() + PROXY_DEAD_RECHECK_INTERVAL_SECONDS
+            )
             return False, repr(exc)
 
     def mark_node_dead(node_index: int, reason: str) -> None:
@@ -5847,6 +6289,7 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         if not node.get("healthy") and node.get("next_recheck", 0):
             return
         node["healthy"] = False
+        node["standby"] = False
         node["last_error"] = reason
         node["health_failures"] = 0
         node["next_recheck"] = time.monotonic() + PROXY_DEAD_RECHECK_INTERVAL_SECONDS
@@ -5882,6 +6325,7 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
             node = {
                 "source_index": source_index,
+                "link": link,
                 "name": name,
                 "protocol": protocol,
                 "port": port,
@@ -5889,10 +6333,18 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                 "config_path": config_path,
                 "log_path": node_dir / "xray.log",
                 "healthy": False,
+                "standby": False,
+                "startup_tested": False,
                 "health_failures": 0,
                 "next_recheck": 0.0,
                 "busy_batch": None,
+                "retire_after_batch": False,
                 "ip": "",
+                "speed_avg_ms": float("inf"),
+                "speed_score_ms": float("inf"),
+                "speed_successes": 0,
+                "speed_failures": 0,
+                "speed_tested_at": "",
                 "xray_proc": None,
                 "xray_handle": None,
                 "last_error": "",
@@ -5914,33 +6366,301 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         print("No parseable proxy link remains.", file=sys.stderr)
         return 2
 
-    # Initial checks run in parallel. Zero active nodes is allowed; manager waits for recovery.
-    with ThreadPoolExecutor(max_workers=min(len(nodes), 16)) as executor:
-        futures = {executor.submit(start_or_restart_node, node): index for index, node in enumerate(nodes)}
+    # Startup validation is ephemeral: at most VPN_STARTUP_TEST_WORKERS Xray processes
+    # exist during testing, and every tested Xray is stopped immediately afterward.
+    startup_workers = max(1, min(len(nodes), int(VPN_STARTUP_TEST_WORKERS)))
+    logger.log(
+        f"[proxy:startup-test] nodes={len(nodes)} concurrent_workers={startup_workers} "
+        f"max_active_pool_start={cpu_parallelism} cpu_auto_tune={CPU_AUTO_TUNE_ENABLED}",
+        source="PROXY",
+    )
+
+    def startup_test_node(node: dict[str, Any]) -> tuple[bool, str]:
+        ok, error = start_or_restart_node(node, enforce_unique_ip=False, run_speed_test=True)
+        node["startup_tested"] = True
+        if ok:
+            park_node(node)
+            return True, ""
+        return False, error
+
+    tested_count = 0
+    passed_count = 0
+    failed_count = 0
+    console_line(
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"VPN Test: 0/{len(nodes)} (0.00%) | "
+        f"Passed: 0 | Failed: 0 | Testing at once: {startup_workers}"
+    )
+    with ThreadPoolExecutor(max_workers=startup_workers) as executor:
+        futures = {executor.submit(startup_test_node, node): index for index, node in enumerate(nodes)}
         for future in as_completed(futures):
             index = futures[future]
             ok, error = future.result()
+            tested_count += 1
             if ok:
+                passed_count += 1
                 logger.log(
-                    f"[proxy:active] node={index} protocol={nodes[index]['protocol']} ip={nodes[index]['ip']}",
+                    f"[proxy:startup-pass] node={index} protocol={nodes[index]['protocol']} "
+                    f"ip={nodes[index]['ip']} "
+                    f"speed_score_ms={safe_float(nodes[index].get('speed_score_ms')):.1f} "
+                    f"speed_avg_ms={safe_float(nodes[index].get('speed_avg_ms')):.1f} "
+                    f"speed_failures={int(nodes[index].get('speed_failures', 0))}",
                     source="PROXY",
                 )
             else:
+                failed_count += 1
                 logger.log(
                     f"[proxy:startup-failed] node={index} error={error}",
                     source="PROXY",
                     force_error=True,
                 )
-    seen_initial_ips: dict[str, int] = {}
-    for index, node in enumerate(nodes):
-        if not node.get("healthy"):
-            continue
-        ip = str(node.get("ip") or "")
-        if VLESS_REQUIRE_UNIQUE_OUTBOUND_IPS and ip in seen_initial_ips:
-            mark_node_dead(index, f"duplicate outbound IP {ip}; first_node={seen_initial_ips[ip]}")
+            if tested_count == 1 or tested_count == len(nodes) or (
+                VPN_STARTUP_PROGRESS_EVERY > 0
+                and tested_count % int(VPN_STARTUP_PROGRESS_EVERY) == 0
+            ):
+                test_percent = (
+                    tested_count / len(nodes) * 100.0 if nodes else 100.0
+                )
+                console_line(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"VPN Test: {tested_count}/{len(nodes)} ({test_percent:.2f}%) | "
+                    f"Passed: {passed_count} | Failed: {failed_count} | "
+                    f"Testing at once: {startup_workers}"
+                )
+
+    console_line("", newline=True)
+
+    # For duplicate outbound IPs, keep the fastest Polymarket-tested config.
+    if VLESS_REQUIRE_UNIQUE_OUTBOUND_IPS:
+        nodes_by_ip: dict[str, list[int]] = {}
+        for index, node in enumerate(nodes):
+            if node.get("standby"):
+                nodes_by_ip.setdefault(str(node.get("ip") or ""), []).append(index)
+
+        for ip, indexes in nodes_by_ip.items():
+            if not ip or len(indexes) <= 1:
+                continue
+            fastest_index = min(indexes, key=lambda idx: _vpn_rank_key(nodes[idx]))
+            for index in indexes:
+                if index == fastest_index:
+                    continue
+                node = nodes[index]
+                node["standby"] = False
+                node["last_error"] = (
+                    f"duplicate outbound IP {ip}; faster_node={fastest_index}"
+                )
+                node["next_recheck"] = (
+                    time.monotonic() + PROXY_DEAD_RECHECK_INTERVAL_SECONDS
+                )
+                logger.log(
+                    f"[proxy:duplicate] node={index} ip={ip} "
+                    f"kept_node={fastest_index} "
+                    f"kept_score_ms={safe_float(nodes[fastest_index].get('speed_score_ms')):.1f} "
+                    f"dropped_score_ms={safe_float(node.get('speed_score_ms')):.1f}",
+                    source="PROXY",
+                    force_error=True,
+                )
+
+    # Snapshot is intentionally written exactly once per program run.
+    # Later health checks, recoveries, dead nodes and worker assignments never edit it.
+    startup_snapshot_path = _write_startup_sorted_vpn_snapshot(
+        script_path.parent,
+        nodes,
+    )
+    startup_snapshot_count = sum(
+        1
+        for node in nodes
+        if (node.get("healthy") or node.get("standby"))
+        and str(node.get("link") or "").strip()
+    )
+    logger.log(
+        f"[proxy:startup-snapshot] file={startup_snapshot_path} "
+        f"working_unique_sorted={startup_snapshot_count} immutable_until_exit=true",
+        source="PROXY",
+    )
+    if CLEAN_CONSOLE_DASHBOARD:
+        console_stdout.write(
+            f"Startup VPN snapshot saved: {startup_snapshot_path} "
+            f"({startup_snapshot_count} working unique VPNs, best first)\n"
+        )
+        console_stdout.flush()
+
+
+    def rebalance_best_active_nodes() -> None:
+        max_active = max(1, min(len(nodes), int(cpu_parallelism)))
+        usable_indexes = [
+            index
+            for index, node in enumerate(nodes)
+            if node.get("healthy") or node.get("standby")
+        ]
+        ranked_indexes = sorted(
+            usable_indexes,
+            key=lambda index: _vpn_rank_key(nodes[index]),
+        )
+        desired = set(ranked_indexes[:max_active])
+
+        # Slower active nodes that are no longer in the best-N pool are parked.
+        for index, node in enumerate(nodes):
+            if not node.get("healthy"):
+                continue
+            if index in desired:
+                node["retire_after_batch"] = False
+                continue
+
+            if index in worker_states:
+                if not node.get("retire_after_batch"):
+                    node["retire_after_batch"] = True
+                    logger.log(
+                        f"[proxy:retire-slower-after-batch] node={index} "
+                        f"score_ms={safe_float(node.get('speed_score_ms')):.1f}",
+                        source="PROXY",
+                    )
+            else:
+                park_node(node)
+                node["retire_after_batch"] = False
+                logger.log(
+                    f"[proxy:parked-slower] node={index} "
+                    f"score_ms={safe_float(node.get('speed_score_ms')):.1f}",
+                    source="PROXY",
+                )
+
+        active_count = sum(1 for node in nodes if node.get("healthy"))
+        for index in ranked_indexes:
+            if active_count >= max_active:
+                break
+            node = nodes[index]
+            if index not in desired or not node.get("standby") or index in worker_states:
+                continue
+
+            ok, error = start_or_restart_node(
+                node,
+                enforce_unique_ip=True,
+                run_speed_test=False,
+            )
+            if ok:
+                active_count += 1
+                logger.log(
+                    f"[proxy:promoted-best] node={index} ip={node['ip']} "
+                    f"rank_score_ms={safe_float(node.get('speed_score_ms')):.1f} "
+                    f"active={active_count}/{max_active}",
+                    source="PROXY",
+                )
+            else:
+                logger.log(
+                    f"[proxy:promotion-failed] node={index} error={error}",
+                    source="PROXY",
+                    force_error=True,
+                )
+
+
+    def stop_one_excess_worker_for_cpu() -> bool:
+        """Immediately remove the slowest excess active node after CPU scale-down."""
+        active_indexes = [
+            index for index, node in enumerate(nodes) if node.get("healthy")
+        ]
+        if len(active_indexes) <= cpu_parallelism:
+            return False
+
+        active_indexes.sort(
+            key=lambda index: _vpn_rank_key(nodes[index]),
+            reverse=True,
+        )
+        node_index = active_indexes[0]
+        node = nodes[node_index]
+        worker = worker_states.get(node_index)
+        if worker is not None:
+            worker["forced_stop"] = True
+            worker["cpu_scale_down"] = True
+            node["retire_after_batch"] = True
+            stop_process(worker["proc"])
+            logger.log(
+                f"[cpu:auto-scale-stop] node={node_index} "
+                f"batch={worker.get('batch_id')} new_limit={cpu_parallelism}; "
+                "unfinished wallets will return to queue",
+                source="CPU",
+            )
         else:
-            seen_initial_ips[ip] = index
+            park_node(node)
+            node["retire_after_batch"] = False
+            logger.log(
+                f"[cpu:auto-scale-park] node={node_index} "
+                f"new_limit={cpu_parallelism}",
+                source="CPU",
+            )
+        return True
+
+    def apply_cpu_auto_tune() -> None:
+        nonlocal cpu_parallelism
+        nonlocal last_cpu_window_peak
+        nonlocal last_cpu_window_average
+        nonlocal last_cpu_all_time_peak
+
+        window = cpu_monitor.consume_window()
+        samples = int(window.get("window_samples", 0) or 0)
+        peak = safe_float(window.get("window_peak"))
+        average = safe_float(window.get("window_average"))
+        all_time_peak = safe_float(window.get("all_time_peak"))
+        last_cpu_window_peak = peak
+        last_cpu_window_average = average
+        last_cpu_all_time_peak = all_time_peak
+
+        if samples <= 0:
+            logger.log(
+                f"[cpu:auto-tune-hold] no CPU samples; "
+                f"limit remains {cpu_parallelism}",
+                source="CPU",
+                force_error=True,
+            )
+            return
+
+        old_limit = cpu_parallelism
+        if peak >= float(CPU_AUTO_TUNE_LIMIT_PERCENT):
+            cpu_parallelism = max(
+                int(CPU_AUTO_TUNE_MIN_PARALLELISM),
+                cpu_parallelism - 1,
+            )
+            action = "down" if cpu_parallelism < old_limit else "hold-min"
+        else:
+            cpu_parallelism = min(cpu_parallelism_cap, cpu_parallelism + 1)
+            action = "up" if cpu_parallelism > old_limit else "hold-max"
+
+        logger.log(
+            f"[cpu:auto-tune] samples={samples} peak_1m={peak:.2f}% "
+            f"avg_1m={average:.2f}% all_time_peak={all_time_peak:.2f}% "
+            f"threshold={CPU_AUTO_TUNE_LIMIT_PERCENT:.2f}% action={action} "
+            f"VPN_MAX_ACTIVE_NODES={cpu_parallelism} "
+            f"VPN_DEAD_RECHECK_WORKERS={cpu_parallelism}",
+            source="CPU",
+        )
+
+        if cpu_parallelism < old_limit and CPU_AUTO_TUNE_IMMEDIATE_SCALE_DOWN:
+            stop_one_excess_worker_for_cpu()
+        rebalance_best_active_nodes()
+        update_active_file(force=True)
+
+
+    rebalance_best_active_nodes()
     update_active_file(force=True)
+    if CPU_AUTO_TUNE_ENABLED:
+        if cpu_monitor.available:
+            cpu_monitor.start()
+            next_cpu_tune = (
+                time.monotonic() + float(CPU_AUTO_TUNE_WINDOW_SECONDS)
+            )
+            logger.log(
+                f"[cpu:auto-tune-start] start_limit={cpu_parallelism} "
+                f"cap={cpu_parallelism_cap} "
+                f"sample_every={CPU_AUTO_TUNE_SAMPLE_INTERVAL_SECONDS}s "
+                f"window={CPU_AUTO_TUNE_WINDOW_SECONDS}s "
+                f"threshold={CPU_AUTO_TUNE_LIMIT_PERCENT}%",
+                source="CPU",
+            )
+        else:
+            logger.log(
+                "[cpu:auto-tune-disabled] system CPU counters are unavailable",
+                source="CPU",
+                force_error=True,
+            )
 
     def all_cache_dirs() -> list[Path]:
         dirs = sorted(path for path in cache_root.glob("bucket_*") if path.is_dir())
@@ -6020,6 +6740,7 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             "batch_file": batch_file,
             "wallets": wallets_set,
             "forced_stop": False,
+            "cpu_scale_down": False,
         }
         node["busy_batch"] = batch_id
         logger.log(
@@ -6043,17 +6764,22 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                     continue
                 queue.unregister_pid(proc.pid)
                 completed = load_test_memory(state["bucket_dir"] / TEST_MEMORY_FILE_NAME) & state["wallets"]
+                cpu_scale_down = bool(state.get("cpu_scale_down"))
                 error = (
                     "worker completed"
                     if return_code == 0
-                    else f"worker exit={return_code} forced_stop={state.get('forced_stop', False)}"
+                    else (
+                        "worker intentionally stopped by CPU auto-tune"
+                        if cpu_scale_down
+                        else f"worker exit={return_code} forced_stop={state.get('forced_stop', False)}"
+                    )
                 )
                 done_count, requeued = queue.finish_batch(state["wallets"], completed, error)
                 logger.log(
                     f"[worker:finish] node={node_index} batch={state['batch_id']} "
                     f"exit={return_code} done={done_count} requeued={requeued}",
                     source="QUEUE",
-                    force_error=(return_code != 0),
+                    force_error=(return_code != 0 and not cpu_scale_down),
                 )
                 try:
                     state["batch_file"].unlink(missing_ok=True)
@@ -6063,6 +6789,17 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                 worker_states.pop(node_index, None)
                 if return_code == 75:
                     mark_node_dead(node_index, "worker reported repeated proxy failures")
+                elif (
+                    nodes[node_index].get("retire_after_batch")
+                    and nodes[node_index].get("healthy")
+                ):
+                    nodes[node_index]["retire_after_batch"] = False
+                    park_node(nodes[node_index])
+                    logger.log(
+                        f"[proxy:parked-after-batch] node={node_index} "
+                        f"reason=slower-than-best-{cpu_parallelism}",
+                        source="PROXY",
+                    )
                 update_active_file(force=True)
 
             counts = queue.counts()
@@ -6070,6 +6807,16 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                 break
 
             now = time.monotonic()
+            if (
+                CPU_AUTO_TUNE_ENABLED
+                and cpu_monitor.available
+                and next_cpu_tune > 0
+                and now >= next_cpu_tune
+            ):
+                apply_cpu_auto_tune()
+                # Fixed one-minute cadence; no rapid catch-up after a long blocking call.
+                next_cpu_tune = now + float(CPU_AUTO_TUNE_WINDOW_SECONDS)
+
             if now >= next_health_check:
                 healthy_indexes = [i for i, node in enumerate(nodes) if node.get("healthy")]
                 if healthy_indexes:
@@ -6116,30 +6863,51 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             due = [
                 index
                 for index, node in enumerate(nodes)
-                if not node.get("healthy") and now >= float(node.get("next_recheck", 0.0))
+                if (
+                    not node.get("healthy")
+                    and not node.get("standby")
+                    and now >= float(node.get("next_recheck", 0.0))
+                )
             ]
             if PROXY_DEAD_RECHECK_ENABLED and due:
-                with ThreadPoolExecutor(max_workers=min(len(due), 8)) as executor:
-                    futures = {executor.submit(start_or_restart_node, nodes[index]): index for index in due}
+                recheck_workers = max(1, min(len(due), int(cpu_parallelism)))
+
+                def recheck_dead_node(index: int) -> tuple[bool, str]:
+                    node = nodes[index]
+                    ok, error = start_or_restart_node(node, enforce_unique_ip=False, run_speed_test=True)
+                    if ok:
+                        park_node(node)
+                    return ok, error
+
+                with ThreadPoolExecutor(max_workers=recheck_workers) as executor:
+                    futures = {executor.submit(recheck_dead_node, index): index for index in due}
                     for future in as_completed(futures):
                         index = futures[future]
                         ok, error = future.result()
                         if ok:
                             logger.log(
-                                f"[proxy:recovered] node={index} ip={nodes[index]['ip']}",
+                                f"[proxy:recovered-standby] node={index} ip={nodes[index]['ip']}",
                                 source="PROXY",
                             )
                         else:
                             logger.log(
-                                f"[proxy:still-dead] node={index} next={PROXY_DEAD_RECHECK_INTERVAL_SECONDS}s error={error}",
+                                f"[proxy:still-dead] node={index} "
+                                f"next={PROXY_DEAD_RECHECK_INTERVAL_SECONDS}s error={error}",
                                 source="PROXY",
                                 force_error=True,
                             )
                 update_active_file(force=True)
 
+            # Keep the fastest runtime CPU-tuned number of VPN nodes active.
+            rebalance_best_active_nodes()
+
             # Every idle healthy VPN claims the next available batch from the one global queue.
             for node_index, node in enumerate(nodes):
-                if not node.get("healthy") or node_index in worker_states:
+                if (
+                    not node.get("healthy")
+                    or node_index in worker_states
+                    or node.get("retire_after_batch")
+                ):
                     continue
                 launch_batch(node_index)
 
@@ -6167,6 +6935,7 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
             queue.unregister_pid(getattr(proc, "pid", None))
             stop_process(proc)
         for node in nodes:
+            was_working = bool(node.get("healthy") or node.get("standby"))
             proc = node.get("xray_proc")
             queue.unregister_pid(getattr(proc, "pid", None))
             stop_process(proc)
@@ -6176,6 +6945,16 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
                     handle.close()
                 except Exception:
                     pass
+            node["xray_proc"] = None
+            node["xray_handle"] = None
+            node["healthy"] = False
+            node["standby"] = was_working
+            node["busy_batch"] = None
+            node["retire_after_batch"] = False
+        try:
+            cpu_monitor.stop()
+        except Exception:
+            pass
         queue.recover_interrupted()
         sync_completed()
         update_active_file(force=True)
