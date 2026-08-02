@@ -38,6 +38,7 @@ import traceback
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -102,12 +103,12 @@ BASE_URL = "https://data-api.polymarket.com"
 RUN_MODE = 2
 
 # شناسه نسخه برای اینکه معلوم باشد دقیقاً همین فایل جدید اجرا شده است.
-BUILD_ID = "global-queue-v57-exact-trade-multiset-verification"
+BUILD_ID = "global-queue-v58-reconciled-ledger-verification"
 # پوشه خروجی. برای اینکه مود 2 بتواند خروجی مود 1 را بخواند، بین دو مود تغییرش نده.
 OUT_DIR = "polymarket_edge_output"
 
 # اسم فایل حافظه مود 2 و مرجع قطعی Resume.
-# هر تلاش همراه آمار دقیق اینجا ثبت می‌شود، اما فقط ردیف v57 با status=scored،
+# هر تلاش همراه آمار دقیق اینجا ثبت می‌شود، اما فقط ردیف v58 با status=scored،
 # coverageStatus=verified، تطبیق دقیق چندمجموعهٔ ردیف‌های /trades و /activity،
 # صفر market/outcome گمشده، pagination کامل هر دو endpoint و پاسخ زنده /traded
 # برای Resume قطعی Done است. ردیف incomplete در اجرای بعد Retry می‌شود. حذف
@@ -117,22 +118,39 @@ TEST_MEMORY_FILE_NAME = "wallet_test_memory.csv"
 # Workerهای صف جهانی در فایل نسخه‌بندی‌شده خودشان می‌نویسند تا فایل‌های باز یا
 # schema قدیمی اجرای قبل روی ویندوز باعث WinError 5 نشوند. Manager این فایل‌ها را
 # به‌صورت زنده داخل TEST_MEMORY_FILE_NAME ادغام می‌کند.
-WORKER_TEST_MEMORY_FILE_NAME = "wallet_test_memory_v57.csv"
+WORKER_TEST_MEMORY_FILE_NAME = "wallet_test_memory_v58.csv"
 LEGACY_WORKER_TEST_MEMORY_FILE_NAMES = (
+    "wallet_test_memory_v57.csv",
     "wallet_test_memory_v56.csv",
     "wallet_test_memory_v55.csv",
     "wallet_test_memory_v54.csv",
     "wallet_test_memory_v53.csv",
 )
 TEST_MEMORY_STATE_FILE_NAME = "wallet_test_memory_state.json"
-TEST_MEMORY_SCHEMA_VERSION = 6
-TRADE_SET_VERIFICATION_VERSION = "exact-trade-multiset-outcome-set-v3"
+TEST_MEMORY_SCHEMA_VERSION = 7
+TRADE_SET_VERIFICATION_VERSION = "reconciled-ledger-multiset-snapshot-v4"
 TEST_MEMORY_SYNC_SECONDS = 5.0
 TEST_MEMORY_FIELDNAMES = [
     "proxyWallet",
     "userName",
     "status",
     "reason",
+    "snapshotStart",
+    "snapshotEnd",
+    "tradesRawRows",
+    "activityRawRows",
+    "logicalTradeRows",
+    "matchedCoreRows",
+    "activityOnlyRows",
+    "tradesOnlyRows",
+    "exactRepeatedRows",
+    "valueDifferenceRows",
+    "sideDifferenceRows",
+    "onchainVerifiedRows",
+    "verifiedTradeRows",
+    "unresolvedTradeRows",
+    "tradeVerificationStatus",
+    "verificationReason",
     "downloadedPositions",
     "downloadedMarkets",
     "downloadedTradeRows",
@@ -217,6 +235,13 @@ HTTP_TIMEOUT = 30.0
 
 # تعداد تلاش دوباره وقتی API موقتاً خطا می‌دهد.
 HTTP_RETRIES = 8
+
+# Freeze both trade sources to one wallet-local boundary.  Recent indexed data is
+# intentionally deferred to the next run instead of racing two independently
+# updated endpoints.
+SNAPSHOT_FINALITY_LAG_SECONDS = max(
+    0, int(os.environ.get("POLYMARKET_SNAPSHOT_FINALITY_LAG_SECONDS", "30"))
+)
 
 # دسته‌بندی‌هایی که از لیدربورد پلی‌مارکت گرفته می‌شوند.
 # اگر دسته‌ای را نمی‌خواهی، از لیست حذفش کن.
@@ -472,7 +497,7 @@ ACTIVITY_MAX_OFFSET = 5000
 # ده‌هزار هیچ معامله‌ای را حذف نکند.
 TRADE_PAGE_LIMIT = 10000
 TRADE_MAX_OFFSET = 10000
-TRADE_DISCOVERY_VERSION = "trades-maker-taker-full-history-multiset-v3"
+TRADE_DISCOVERY_VERSION = "trades-maker-taker-reconciled-core-multiset-v4"
 
 # Combo position endpoint cursor/offset pagination.
 COMBO_POSITION_PAGE_LIMIT = 1000
@@ -691,7 +716,7 @@ ERROR_LOG_FILE_NAME = "errors.txt"
 # لاگ تشخیصی کم‌حجم برای پیدا کردن گلوگاه واقعی سرعت.
 # یک بلوک کامل در شروع، سپس هر چند دقیقه و هنگام خروج نوشته می‌شود.
 DIAGNOSTIC_LOG_FILE_NAME = "diagnostics_summary.log"
-DIAGNOSTIC_LOG_INTERVAL_SECONDS = 180.0
+DIAGNOSTIC_LOG_INTERVAL_SECONDS = 60.0
 DIAGNOSTIC_STALL_SECONDS = 300.0
 DIAGNOSTIC_OLDEST_WORKERS = 8
 DIAGNOSTIC_ERROR_SAMPLE_LINES = 20
@@ -777,8 +802,9 @@ PROXY_WORKER_MAX_CONSECUTIVE_FETCH_FAILURES = 3
 # v52 برای تغییر schema همین فایل را با os.replace جایگزین می‌کرد و روی ویندوز
 # در صورت بازبودن فایل، تمام Workerها با WinError 5 می‌مردند. هر نسخه فایل قدیمی
 # را read-only می‌خواند و همه Appendهای تازه را در Journal نسخه‌بندی‌شده می‌نویسد.
-SCORE_JOURNAL_FILE_NAME = "edge_scores_journal_v57.csv"
+SCORE_JOURNAL_FILE_NAME = "edge_scores_journal_v58.csv"
 LEGACY_SCORE_JOURNAL_FILE_NAMES = (
+    "edge_scores_journal_v57.csv",
     "edge_scores_journal.csv",
     "edge_scores_journal_v53.csv",
     "edge_scores_journal_v54.csv",
@@ -2847,22 +2873,35 @@ def markets_from_activity_rows(rows: list[dict[str, Any]]) -> set[str]:
 
 
 def trade_event_unique_key(row: dict[str, Any]) -> str:
-    """Stable identity for one /trades row, including same-tx multi fills."""
+    """Return the v58 structural identity shared by /trades and /activity.
+
+    Accounting representations are deliberately excluded.  In particular size,
+    price, USDC size and side can describe gross/net or maker/taker views of the
+    same fill.  Multiplicity is retained by ``trade_occurrence_evidence_from_rows``.
+    A missing hash gets a visibly separate, conservative secondary identity; the
+    reconciliation gate refuses to score those rows without on-chain evidence.
+    """
+    raw_hash = str(row.get("transactionHash") or "").strip().lower()
+    valid_hash = bool(re.fullmatch(r"0x[0-9a-f]{64}", raw_hash))
+    transaction_hash = raw_hash if valid_hash else "invalid-hash"
+    raw_timestamp = str(row.get("timestamp") or "").strip()
+    try:
+        timestamp = str(int(Decimal(raw_timestamp)))
+    except (InvalidOperation, ValueError, OverflowError):
+        timestamp = raw_timestamp
     payload = "|".join(
         (
-            str(row.get("transactionHash") or "").strip().lower(),
+            transaction_hash,
             normalize_market_id(
                 row.get("conditionId") or row.get("combo_condition_id")
             ),
             str(row.get("asset") or "").strip().lower(),
-            str(row.get("timestamp") or "").strip(),
-            str(row.get("side") or "").strip().upper(),
-            str(row.get("size") or "").strip(),
-            str(row.get("price") or "").strip(),
             str(row.get("outcomeIndex") if row.get("outcomeIndex") is not None else ""),
+            timestamp,
         )
     )
-    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+    prefix = "core:" if valid_hash else "secondary-unverified:"
+    return prefix + hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
 
 
 def trade_evidence_from_rows(
@@ -3426,11 +3465,43 @@ def compare_trade_occurrence_multisets(
     )
     trades_raw = sum(trade_counts.values())
     activity_raw = sum(activity_counts.values())
-    if activity_raw > 0:
-        coverage = matched / activity_raw * 100.0
+    logical_rows = sum(max(trade_counts.get(key, 0), activity_counts.get(key, 0)) for key in all_keys)
+    invalid_hash_rows = sum(
+        max(trade_counts.get(key, 0), activity_counts.get(key, 0))
+        for key in all_keys
+        if key.startswith("secondary-unverified:")
+    )
+    unresolved = missing + extra + invalid_hash_rows
+    verified_rows = max(0, logical_rows - unresolved)
+    if logical_rows > 0:
+        coverage = verified_rows / logical_rows * 100.0
     else:
-        coverage = 100.0 if trades_raw == 0 else 0.0
+        coverage = 100.0
+    verification_status = (
+        "verified_api" if unresolved == 0 else
+        "needs_onchain" if invalid_hash_rows or missing or extra else
+        "incomplete_unresolved"
+    )
     return {
+        "snapshotStart": 1,
+        "tradesRawRows": trades_raw,
+        "activityRawRows": activity_raw,
+        "logicalTradeRows": logical_rows,
+        "matchedCoreRows": matched,
+        "activityOnlyRows": missing,
+        "tradesOnlyRows": extra,
+        "exactRepeatedRows": sum(max(0, count - 1) for count in trade_counts.values()),
+        "valueDifferenceRows": 0,
+        "sideDifferenceRows": 0,
+        "onchainVerifiedRows": 0,
+        "verifiedTradeRows": verified_rows,
+        "unresolvedTradeRows": unresolved,
+        "tradeVerificationStatus": verification_status,
+        "verificationReason": (
+            "core-identity-and-multiplicity-match"
+            if unresolved == 0
+            else "missing-or-ambiguous-rows-require-targeted-onchain-verification"
+        ),
         "downloadedTradeRows": trades_raw,
         "uniqueTradeRows": len(trade_counts),
         "duplicateTradeRows": max(0, trades_raw - len(trade_counts)),
@@ -3440,9 +3511,7 @@ def compare_trade_occurrence_multisets(
         "missingTradeRows": missing,
         "extraTradeRows": extra,
         "tradeRowCoveragePercent": f"{coverage:.2f}%",
-        "tradeRowVerificationStatus": (
-            "verified" if missing == 0 and extra == 0 else "mismatch"
-        ),
+        "tradeRowVerificationStatus": "verified" if unresolved == 0 else verification_status,
         "tradeRowSetsEqual": bool(missing == 0 and extra == 0),
     }
 
@@ -3451,6 +3520,7 @@ def get_complete_activity_markets(
     client: PolymarketClient,
     wallet: str,
     cache: CompleteFetchCache,
+    snapshot_end: int | None = None,
 ) -> tuple[set[str], set[str], int, int, set[str], set[str]]:
     cached_markets = cache.get_activity_markets(wallet)
     cached_position_keys = cache.get_activity_position_keys(wallet)
@@ -3460,7 +3530,7 @@ def get_complete_activity_markets(
         start_ts = int(existing_scan["scan_start"])
         requested_end = int(existing_scan["scan_end"])
     else:
-        requested_end = int(time.time())
+        requested_end = max(1, int(snapshot_end if snapshot_end is not None else time.time()))
         start_ts = max(previous_end - 1, 1) if previous_end else 1
 
     print(
@@ -5723,6 +5793,14 @@ def add_polymarket_trade_metrics(
         coverage_status = "verified"
 
     enriched["downloadedMarkets"] = fetched_markets
+    for audit_field in (
+        "snapshotStart", "snapshotEnd", "tradesRawRows", "activityRawRows",
+        "logicalTradeRows", "matchedCoreRows", "activityOnlyRows",
+        "tradesOnlyRows", "exactRepeatedRows", "valueDifferenceRows",
+        "sideDifferenceRows", "onchainVerifiedRows", "verifiedTradeRows",
+        "unresolvedTradeRows", "tradeVerificationStatus", "verificationReason",
+    ):
+        enriched[audit_field] = row_verification.get(audit_field, "")
     enriched["downloadedTradeRows"] = max(
         0,
         int(
@@ -5942,7 +6020,7 @@ def rank_wallets(
     }
     filtered_wallets_to_purge &= shard_wallet_set
     tested_wallets &= shard_wallet_set
-    # Only exact-v57 row-multiset and outcome evidence is authoritative. Older
+    # Only v58 reconciled row-multiset and outcome evidence is authoritative. Older
     # rows can contain false-100% values and must not remain visible while those
     # wallets are waiting for exact re-verification.
     current_scored_wallets = {
@@ -6071,9 +6149,16 @@ def rank_wallets(
                     )
                 continue
 
-            print(f"[closed] {index}/{len(ranked_wallets)} {seed.user_name} {seed.proxy_wallet}", flush=True)
+            snapshot_start = int(time.time())
+            wallet_snapshot_end = max(1, snapshot_start - SNAPSHOT_FINALITY_LAG_SECONDS)
+            print(
+                f"[closed] {index}/{len(ranked_wallets)} {seed.user_name} "
+                f"{seed.proxy_wallet} snapshot=1..{wallet_snapshot_end} "
+                f"finality_lag={SNAPSHOT_FINALITY_LAG_SECONDS}s",
+                flush=True,
+            )
             fetch_metadata: dict[str, Any] = {}
-            # v57 always refreshes exact trade-row multiplicity plus market/outcome evidence before
+            # v58 always refreshes reconciled trade multiplicity plus market/outcome evidence before
             # accepting a wallet.
             # Raw JSONL remains a durable backup, but cannot prove that no trade was
             # added after its timestamp. SQLite still reuses every exact market row.
@@ -6137,7 +6222,7 @@ def rank_wallets(
             traded_count = 0
             official_traded_live = False
             official_traded_source = ""
-            trade_snapshot_end = max(1, int(time.time()))
+            trade_snapshot_end = wallet_snapshot_end
             for verification_pass in range(1, 3):
                 (
                     traded_market_ids,
@@ -6150,6 +6235,7 @@ def rank_wallets(
                     client,
                     seed.proxy_wallet,
                     complete_fetch_cache,
+                    snapshot_end=trade_snapshot_end,
                 )
                 (
                     traded_count,
@@ -6202,6 +6288,8 @@ def rank_wallets(
                     primary_trade_occurrences,
                     independent_trade_occurrences,
                 )
+                trade_row_verification["snapshotStart"] = snapshot_start
+                trade_row_verification["snapshotEnd"] = trade_snapshot_end
             except Exception as exc:
                 trade_row_verification = {
                     "downloadedTradeRows": sum(
@@ -7653,6 +7741,22 @@ def get_score_fieldnames() -> list[str]:
         "adjustedWinRate",
         "winRate",
         "positions",
+        "snapshotStart",
+        "snapshotEnd",
+        "tradesRawRows",
+        "activityRawRows",
+        "logicalTradeRows",
+        "matchedCoreRows",
+        "activityOnlyRows",
+        "tradesOnlyRows",
+        "exactRepeatedRows",
+        "valueDifferenceRows",
+        "sideDifferenceRows",
+        "onchainVerifiedRows",
+        "verifiedTradeRows",
+        "unresolvedTradeRows",
+        "tradeVerificationStatus",
+        "verificationReason",
         "downloadedMarkets",
         "downloadedTradeRows",
         "uniqueTradeRows",
