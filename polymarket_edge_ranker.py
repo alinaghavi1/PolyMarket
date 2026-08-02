@@ -104,8 +104,12 @@ RUN_MODE = 2
 
 # شناسه نسخه برای اینکه معلوم باشد دقیقاً همین فایل جدید اجرا شده است.
 BUILD_ID = "global-queue-v58-reconciled-ledger-verification"
-# پوشه خروجی. برای اینکه مود 2 بتواند خروجی مود 1 را بخواند، بین دو مود تغییرش نده.
-OUT_DIR = "polymarket_edge_output"
+# از این نسخه تمام فایل‌های جدید روی Drive نوشته می‌شوند. مسیر قدیمی فقط‌خواندنی
+# پایین نگه داشته شده تا Resume و Cacheهای فعلی دوباره دانلود نشوند.
+NEW_STORAGE_ROOT = r"C:\Users\Administrator\Desktop\PolyMarket\Drive"
+LEGACY_OUT_DIR = "polymarket_edge_output"
+LEGACY_VLESS_OUTPUT_ROOT = "polymarket_edge_output_vless"
+OUT_DIR = str(Path(NEW_STORAGE_ROOT) / "polymarket_edge_output")
 
 # اسم فایل حافظه مود 2 و مرجع قطعی Resume.
 # هر تلاش همراه آمار دقیق اینجا ثبت می‌شود، اما فقط ردیف v58 با status=scored،
@@ -568,11 +572,11 @@ XRAY_EXECUTABLE = "xray.exe"
 # هر نود یک HTTP proxy محلی جدا و یک shard جدا می‌گیرد.
 VLESS_LOCAL_HTTP_PORT_START = 18080
 # نام پوشه برای سازگاری با cache اجرای قبلی تغییر نکرده است.
-VLESS_OUTPUT_ROOT = "polymarket_edge_output_vless"
+VLESS_OUTPUT_ROOT = str(Path(NEW_STORAGE_ROOT) / "polymarket_edge_output_vless")
 
 # پوشه اجرای قدیمی به‌عنوان fallback فقط‌خواندنی استفاده می‌شود تا حافظه، score و
 # cache قبلی دوباره دانلود نشوند. خروجی‌های جدید هر shard جدا هستند.
-VLESS_FALLBACK_OUT_DIR = OUT_DIR
+VLESS_FALLBACK_OUT_DIR = LEGACY_OUT_DIR
 
 # پیش از اجرا IP خروجی هر نود بررسی می‌شود. نودهای خراب یا IPهای تکراری کنار گذاشته می‌شوند.
 VLESS_CHECK_OUTBOUND_IP = True
@@ -11864,6 +11868,23 @@ def _discover_resume_sources(root: Path, fallback: Path | None) -> list[Path]:
                     path.resolve()
                     for pattern in ("bucket_*", f"{HEAVY_TAIL_BUCKET_SPILLOVER_PREFIX}_*")
                     for path in cache_root.glob(pattern)
+                    if path.is_dir()
+                )
+            )
+    # After moving new writes to Drive, continue reading every old shard/bucket
+    # in place. Nothing in the legacy tree is deleted or rewritten.
+    legacy_root = Path(LEGACY_VLESS_OUTPUT_ROOT).resolve()
+    if legacy_root.exists() and legacy_root != root.resolve():
+        result.extend(
+            sorted(path.resolve() for path in legacy_root.glob("part_*") if path.is_dir())
+        )
+        legacy_cache_root = legacy_root / GLOBAL_QUEUE_CACHE_DIR_NAME
+        if legacy_cache_root.exists():
+            result.extend(
+                sorted(
+                    path.resolve()
+                    for pattern in ("bucket_*", f"{HEAVY_TAIL_BUCKET_SPILLOVER_PREFIX}_*")
+                    for path in legacy_cache_root.glob(pattern)
                     if path.is_dir()
                 )
             )
