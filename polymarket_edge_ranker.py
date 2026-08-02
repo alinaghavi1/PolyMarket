@@ -127,8 +127,8 @@ LEGACY_WORKER_TEST_MEMORY_FILE_NAMES = (
     "wallet_test_memory_v53.csv",
 )
 TEST_MEMORY_STATE_FILE_NAME = "wallet_test_memory_state.json"
-TEST_MEMORY_SCHEMA_VERSION = 7
-TRADE_SET_VERIFICATION_VERSION = "reconciled-ledger-multiset-snapshot-v4"
+TEST_MEMORY_SCHEMA_VERSION = 8
+TRADE_SET_VERIFICATION_VERSION = "reconciled-ledger-multiset-snapshot-v5"
 TEST_MEMORY_SYNC_SECONDS = 5.0
 TEST_MEMORY_FIELDNAMES = [
     "proxyWallet",
@@ -6944,6 +6944,21 @@ def test_memory_row_is_exactly_verified(row: dict[str, Any]) -> bool:
         return False
     if str(row.get("verificationVersion") or "").strip() != TRADE_SET_VERIFICATION_VERSION:
         return False
+    snapshot_start = int(safe_float(row.get("snapshotStart"), 0.0))
+    snapshot_end = int(safe_float(row.get("snapshotEnd"), 0.0))
+    if snapshot_start <= 0 or snapshot_end <= 0 or snapshot_end > snapshot_start:
+        return False
+    logical_trade_rows = int(safe_float(row.get("logicalTradeRows"), -1.0))
+    verified_trade_rows = int(safe_float(row.get("verifiedTradeRows"), -2.0))
+    unresolved_trade_rows = int(safe_float(row.get("unresolvedTradeRows"), -1.0))
+    if (
+        logical_trade_rows < 0
+        or verified_trade_rows != logical_trade_rows
+        or unresolved_trade_rows != 0
+        or str(row.get("tradeVerificationStatus") or "").strip().lower()
+        not in {"verified_api", "verified_api_value_differences", "verified_onchain"}
+    ):
+        return False
     if str(row.get("coverageStatus") or "").strip().lower() != "verified":
         return False
     if int(safe_float(row.get("missingTradeMarkets"), -1.0)) != 0:
@@ -7244,6 +7259,22 @@ def write_test_memory_row(
             "userName": seed.user_name,
             "status": status,
             "reason": reason,
+            "snapshotStart": score.get("snapshotStart", ""),
+            "snapshotEnd": score.get("snapshotEnd", ""),
+            "tradesRawRows": score.get("tradesRawRows", ""),
+            "activityRawRows": score.get("activityRawRows", ""),
+            "logicalTradeRows": score.get("logicalTradeRows", ""),
+            "matchedCoreRows": score.get("matchedCoreRows", ""),
+            "activityOnlyRows": score.get("activityOnlyRows", ""),
+            "tradesOnlyRows": score.get("tradesOnlyRows", ""),
+            "exactRepeatedRows": score.get("exactRepeatedRows", ""),
+            "valueDifferenceRows": score.get("valueDifferenceRows", ""),
+            "sideDifferenceRows": score.get("sideDifferenceRows", ""),
+            "onchainVerifiedRows": score.get("onchainVerifiedRows", ""),
+            "verifiedTradeRows": score.get("verifiedTradeRows", ""),
+            "unresolvedTradeRows": score.get("unresolvedTradeRows", ""),
+            "tradeVerificationStatus": score.get("tradeVerificationStatus", ""),
+            "verificationReason": score.get("verificationReason", ""),
             "downloadedPositions": score.get("positions", ""),
             "downloadedMarkets": score.get("downloadedMarkets", ""),
             "downloadedTradeRows": score.get("downloadedTradeRows", ""),
