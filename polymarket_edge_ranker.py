@@ -1022,6 +1022,17 @@ def merge_position_completeness_summaries(
     remaining = max(0, total - len(latest))
     durable_done = int(counts.get("done", 0) or 0)
     provisional = max(0, len(latest) - durable_done)
+    incomplete_lines = [
+        line for line in latest.values() if " verdict=INCOMPLETE " in f" {line} "
+    ]
+    incomplete_statuses: dict[str, int] = {}
+    for line in incomplete_lines:
+        match = re.search(r"(?:^| )status=([^ ]+)(?: |$)", line)
+        status = match.group(1) if match else "unknown"
+        incomplete_statuses[status] = incomplete_statuses.get(status, 0) + 1
+    status_summary = ",".join(
+        f"{key}:{value}" for key, value in sorted(incomplete_statuses.items())
+    ) or "none"
     header = (
         f"[{timestamp}] SUMMARY build={BUILD_ID} verification="
         f"{TRADE_SET_VERIFICATION_VERSION} total={total} audited={len(latest)} "
@@ -1031,9 +1042,38 @@ def merge_position_completeness_summaries(
         f"queue_running={int(counts.get('running', 0) or 0)} "
         f"queue_done={durable_done} provisional_audits={provisional} "
         f"queue_failed={int(counts.get('failed', 0) or 0)} "
-        f"all_wallets_audited={remaining == 0}\n"
+        f"all_wallets_audited={remaining == 0} "
+        f"incomplete_types={status_summary} "
+        f"details=worst20_incomplete+top3_heavy_complete\n"
     )
-    body = header + "\n".join(latest.values()) + ("\n" if latest else "")
+
+    def logical_trade_count(line: str) -> int:
+        match = re.search(r"(?:^| )trades=\d+/(\d+)(?: |$)", line)
+        return int(match.group(1)) if match else 0
+
+    def unresolved_trade_count(line: str) -> int:
+        match = re.search(r"(?:^| )unresolved_trades=(\d+)(?: |$)", line)
+        return int(match.group(1)) if match else 0
+
+    incomplete_lines = sorted(
+        incomplete_lines,
+        key=unresolved_trade_count,
+        reverse=True,
+    )[:20]
+
+    heavy_complete_lines = sorted(
+        (
+            line
+            for line in latest.values()
+            if " verdict=COMPLETE " in f" {line} "
+        ),
+        key=logical_trade_count,
+        reverse=True,
+    )[:3]
+    detail_lines = incomplete_lines + [
+        "HEAVY_COMPLETE " + line for line in heavy_complete_lines
+    ]
+    body = header + "\n".join(detail_lines) + ("\n" if detail_lines else "")
     _atomic_write_text(destination, body)
     return len(latest)
 
