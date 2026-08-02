@@ -1003,6 +1003,8 @@ def merge_position_completeness_summaries(
 ) -> int:
     """Create one compact latest-verdict-per-wallet log from worker logs."""
     latest: dict[str, str] = {}
+    stale_wallets: set[str] = set()
+    current_marker = f" verification={TRADE_SET_VERIFICATION_VERSION} "
     for directory in sources:
         path = directory / POSITION_COMPLETENESS_WORKER_LOG_FILE_NAME
         if not path.exists():
@@ -1013,6 +1015,9 @@ def merge_position_completeness_summaries(
                     line = raw_line.strip()
                     match = re.search(r"(?:^| )wallet=(0x[0-9a-fA-F]{40})(?: |$)", line)
                     if match:
+                        if current_marker not in f" {line} ":
+                            stale_wallets.add(match.group(1).lower())
+                            continue
                         latest[match.group(1).lower()] = line[:1200]
         except OSError:
             continue
@@ -1043,6 +1048,7 @@ def merge_position_completeness_summaries(
         f"queue_running={int(counts.get('running', 0) or 0)} "
         f"queue_done={durable_done} provisional_audits={provisional} "
         f"queue_failed={int(counts.get('failed', 0) or 0)} "
+        f"stale_wallets_ignored={len(stale_wallets)} "
         f"all_wallets_audited={remaining == 0} "
         f"incomplete_types={status_summary} "
         f"details=worst20_incomplete+top3_heavy_complete\n"
