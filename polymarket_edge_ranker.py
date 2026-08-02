@@ -993,6 +993,7 @@ def append_position_completeness_summary(
 def merge_position_completeness_summaries(
     sources: list[Path],
     destination: Path,
+    queue_counts: dict[str, int] | None = None,
 ) -> int:
     """Create one compact latest-verdict-per-wallet log from worker logs."""
     latest: dict[str, str] = {}
@@ -1011,10 +1012,19 @@ def merge_position_completeness_summaries(
             continue
     timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
     complete = sum(" verdict=COMPLETE " in f" {line} " for line in latest.values())
+    counts = dict(queue_counts or {})
+    total = max(len(latest), int(counts.get("total", len(latest)) or 0))
+    remaining = max(0, total - len(latest))
     header = (
         f"[{timestamp}] SUMMARY build={BUILD_ID} verification="
-        f"{TRADE_SET_VERIFICATION_VERSION} wallets={len(latest)} "
-        f"complete={complete} incomplete={len(latest) - complete}\n"
+        f"{TRADE_SET_VERIFICATION_VERSION} total={total} audited={len(latest)} "
+        f"remaining={remaining} complete={complete} "
+        f"incomplete={len(latest) - complete} "
+        f"queue_pending={int(counts.get('pending', 0) or 0)} "
+        f"queue_running={int(counts.get('running', 0) or 0)} "
+        f"queue_done={int(counts.get('done', 0) or 0)} "
+        f"queue_failed={int(counts.get('failed', 0) or 0)} "
+        f"all_wallets_audited={remaining == 0}\n"
     )
     body = header + "\n".join(latest.values()) + ("\n" if latest else "")
     _atomic_write_text(destination, body)
@@ -13425,14 +13435,15 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         if not force and now - diagnostic_last_snapshot < float(DIAGNOSTIC_LOG_INTERVAL_SECONDS):
             return
 
+        counts = queue.counts()
         # Keep the single user-facing compact audit visible beside
         # diagnostics_summary.log throughout the run, not only after shutdown.
         merge_position_completeness_summaries(
             _discover_resume_sources(root, fallback),
             root / POSITION_COMPLETENESS_LOG_FILE_NAME,
+            queue_counts=counts,
         )
 
-        counts = queue.counts()
         interval_seconds = max(0.001, now - diagnostic_previous_snapshot)
         done_delta = int(counts.get("done", 0)) - int(diagnostic_previous_counts.get("done", 0))
         failed_delta = int(counts.get("failed", 0)) - int(diagnostic_previous_counts.get("failed", 0))
