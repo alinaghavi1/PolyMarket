@@ -716,6 +716,9 @@ ERROR_LOG_FILE_NAME = "errors.txt"
 # لاگ تشخیصی کم‌حجم برای پیدا کردن گلوگاه واقعی سرعت.
 # یک بلوک کامل در شروع، سپس هر چند دقیقه و هنگام خروج نوشته می‌شود.
 DIAGNOSTIC_LOG_FILE_NAME = "diagnostics_summary.log"
+# Copy/paste friendly proof of position completeness.  Unlike the technical
+# diagnostics this contains one bounded line per checked wallet and no proxy data.
+POSITION_COMPLETENESS_LOG_FILE_NAME = "position_completeness_summary.log"
 DIAGNOSTIC_LOG_INTERVAL_SECONDS = 60.0
 DIAGNOSTIC_STALL_SECONDS = 300.0
 DIAGNOSTIC_OLDEST_WORKERS = 8
@@ -930,6 +933,89 @@ def ensure_dir(path: Path) -> None:
 
 def _log_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+_POSITION_COMPLETENESS_LOG_LOCK = threading.RLock()
+
+
+def append_position_completeness_summary(
+    path: Path,
+    wallet: str,
+    score: dict[str, Any],
+    *,
+    fetch_complete: bool,
+    official_traded_live: bool,
+) -> None:
+    """Append one short, self-contained position/trade completeness verdict."""
+    status = str(score.get("coverageStatus") or "unknown").strip()
+    sample = str(
+        score.get("missingOutcomeSample")
+        or score.get("missingMarketSample")
+        or "-"
+    ).replace("\r", " ").replace("\n", " ")[:240]
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    line = (
+        f"[{timestamp}] wallet={str(wallet).lower()} status={status} "
+        f"build={BUILD_ID} verification={TRADE_SET_VERIFICATION_VERSION} "
+        f"snapshot={score.get('snapshotStart', '-')}..{score.get('snapshotEnd', '-')} "
+        f"positions={score.get('positions', '-')} "
+        f"api_outcomes={score.get('apiMatchedTradeOutcomes', '-')}/"
+        f"{score.get('discoveredTradeOutcomes', '-')} "
+        f"api_position_coverage={score.get('positionCoveragePercent', '-')} "
+        f"outcomes={score.get('matchedTradeOutcomes', '-')}/"
+        f"{score.get('discoveredTradeOutcomes', '-')} "
+        f"outcome_coverage={score.get('outcomeCoveragePercent', '-')} "
+        f"missing_outcomes={score.get('missingTradeOutcomes', '-')} "
+        f"extra_outcomes={score.get('extraDownloadedOutcomes', '-')} "
+        f"markets={score.get('matchedTradeMarkets', '-')}/"
+        f"{score.get('discoveredTradeMarkets', '-')} "
+        f"missing_markets={score.get('missingTradeMarkets', '-')} "
+        f"trades={score.get('verifiedTradeRows', '-')}/"
+        f"{score.get('logicalTradeRows', '-')} "
+        f"unresolved_trades={score.get('unresolvedTradeRows', '-')} "
+        f"pagination=trades:{score.get('tradePaginationComplete', False)},"
+        f"activity:{score.get('activityPaginationComplete', False)} "
+        f"fetch_complete={bool(fetch_complete)} "
+        f"official_live={bool(official_traded_live)} "
+        f"verdict={'COMPLETE' if status == 'verified' and fetch_complete else 'INCOMPLETE'} "
+        f"sample={sample}\n"
+    )
+    ensure_dir(path.parent)
+    with _POSITION_COMPLETENESS_LOG_LOCK:
+        with path.open("a", encoding="utf-8", newline="") as file:
+            file.write(line)
+            file.flush()
+
+
+def merge_position_completeness_summaries(
+    sources: list[Path],
+    destination: Path,
+) -> int:
+    """Create one compact latest-verdict-per-wallet log from worker logs."""
+    latest: dict[str, str] = {}
+    for directory in sources:
+        path = directory / POSITION_COMPLETENESS_LOG_FILE_NAME
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as file:
+                for raw_line in file:
+                    line = raw_line.strip()
+                    match = re.search(r"(?:^| )wallet=(0x[0-9a-fA-F]{40})(?: |$)", line)
+                    if match:
+                        latest[match.group(1).lower()] = line[:1200]
+        except OSError:
+            continue
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    complete = sum(" verdict=COMPLETE " in f" {line} " for line in latest.values())
+    header = (
+        f"[{timestamp}] SUMMARY build={BUILD_ID} verification="
+        f"{TRADE_SET_VERIFICATION_VERSION} wallets={len(latest)} "
+        f"complete={complete} incomplete={len(latest) - complete}\n"
+    )
+    body = header + "\n".join(latest.values()) + ("\n" if latest else "")
+    _atomic_write_text(destination, body)
+    return len(latest)
 
 
 def _looks_like_error(message: str) -> bool:
@@ -5944,6 +6030,7 @@ def rank_wallets(
     secondary_page_cache_path = out_dir / SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
     complete_fetch_db_path = out_dir / COMPLETE_FETCH_CACHE_DB_FILE_NAME
+    position_summary_path = out_dir / POSITION_COMPLETENESS_LOG_FILE_NAME
 
     ranked_wallets = (
         list(wallets.values())
@@ -6399,6 +6486,13 @@ def rank_wallets(
                 "coverageStatus": score["coverageStatus"],
                 "verificationVersion": TRADE_SET_VERIFICATION_VERSION,
             }
+            append_position_completeness_summary(
+                position_summary_path,
+                seed.proxy_wallet,
+                score,
+                fetch_complete=fetch_complete,
+                official_traded_live=official_traded_live,
+            )
             raw_file.write(
                 json.dumps(
                     {
@@ -8917,6 +9011,10 @@ def merge_vless_outputs(root: Path, fallback_out_dir: Path | None = None) -> Pat
     merge_test_memory_files(
         memory_sources,
         merged_dir / TEST_MEMORY_FILE_NAME,
+    )
+    merge_position_completeness_summaries(
+        source_dirs,
+        merged_dir / POSITION_COMPLETENESS_LOG_FILE_NAME,
     )
 
     completed_wallets: set[str] = set()
@@ -12234,6 +12332,10 @@ def _merge_global_outputs(
         memory_sources,
         root / TEST_MEMORY_FILE_NAME,
         min_tested_at_ms=refresh_since_ms,
+    )
+    merge_position_completeness_summaries(
+        sources,
+        root / POSITION_COMPLETENESS_LOG_FILE_NAME,
     )
     completed: set[str] = set(current_statuses)
     failures: dict[tuple[str, str], dict[str, str]] = {}
