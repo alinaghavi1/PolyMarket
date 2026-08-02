@@ -975,7 +975,12 @@ def append_position_completeness_summary(
         f"missing_markets={score.get('missingTradeMarkets', '-')} "
         f"trades={score.get('verifiedTradeRows', '-')}/"
         f"{score.get('logicalTradeRows', '-')} "
+        f"trade_sources={score.get('tradesRawRows', '-')}/"
+        f"{score.get('activityRawRows', '-')} "
+        f"activity_only={score.get('activityOnlyRows', '-')} "
+        f"trades_only={score.get('tradesOnlyRows', '-')} "
         f"unresolved_trades={score.get('unresolvedTradeRows', '-')} "
+        f"trade_status={score.get('tradeVerificationStatus', '-')} "
         f"pagination=trades:{score.get('tradePaginationComplete', False)},"
         f"activity:{score.get('activityPaginationComplete', False)} "
         f"fetch_complete={bool(fetch_complete)} "
@@ -1015,6 +1020,8 @@ def merge_position_completeness_summaries(
     counts = dict(queue_counts or {})
     total = max(len(latest), int(counts.get("total", len(latest)) or 0))
     remaining = max(0, total - len(latest))
+    durable_done = int(counts.get("done", 0) or 0)
+    provisional = max(0, len(latest) - durable_done)
     header = (
         f"[{timestamp}] SUMMARY build={BUILD_ID} verification="
         f"{TRADE_SET_VERIFICATION_VERSION} total={total} audited={len(latest)} "
@@ -1022,7 +1029,7 @@ def merge_position_completeness_summaries(
         f"incomplete={len(latest) - complete} "
         f"queue_pending={int(counts.get('pending', 0) or 0)} "
         f"queue_running={int(counts.get('running', 0) or 0)} "
-        f"queue_done={int(counts.get('done', 0) or 0)} "
+        f"queue_done={durable_done} provisional_audits={provisional} "
         f"queue_failed={int(counts.get('failed', 0) or 0)} "
         f"all_wallets_audited={remaining == 0}\n"
     )
