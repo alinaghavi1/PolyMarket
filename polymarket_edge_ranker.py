@@ -127,8 +127,8 @@ LEGACY_WORKER_TEST_MEMORY_FILE_NAMES = (
     "wallet_test_memory_v53.csv",
 )
 TEST_MEMORY_STATE_FILE_NAME = "wallet_test_memory_state.json"
-TEST_MEMORY_SCHEMA_VERSION = 8
-TRADE_SET_VERIFICATION_VERSION = "reconciled-ledger-multiset-snapshot-v5"
+TEST_MEMORY_SCHEMA_VERSION = 9
+TRADE_SET_VERIFICATION_VERSION = "reconciled-ledger-multiset-snapshot-v6"
 TEST_MEMORY_SYNC_SECONDS = 5.0
 TEST_MEMORY_FIELDNAMES = [
     "proxyWallet",
@@ -497,7 +497,7 @@ ACTIVITY_MAX_OFFSET = 5000
 # ده‌هزار هیچ معامله‌ای را حذف نکند.
 TRADE_PAGE_LIMIT = 10000
 TRADE_MAX_OFFSET = 10000
-TRADE_DISCOVERY_VERSION = "trades-maker-taker-reconciled-core-multiset-v4"
+TRADE_DISCOVERY_VERSION = "trades-maker-taker-reconciled-core-multiset-v5"
 
 # Combo position endpoint cursor/offset pagination.
 COMBO_POSITION_PAGE_LIMIT = 1000
@@ -527,7 +527,7 @@ CURRENT_POSITION_OPTIONAL_FOR_CLOSED_COMPLETENESS = False
 # marketهایی که در Activity هستند ولی در Closed/Current دیده نمی‌شوند یک بار
 # تازه‌سازی می‌شوند. باقی‌ماندن آن‌ها فقط هشدار است، چون Activity الزاماً برای هر
 # TRADE یک ردیف Current یا Closed متناظر ایجاد نمی‌کند.
-COVERAGE_REPAIR_PASSES = 1
+COVERAGE_REPAIR_PASSES = 2
 
 # کش SQLite برای ادامه دادن والت‌های بسیار بزرگ بعد از توقف برنامه.
 COMPLETE_FETCH_CACHE_DB_FILE_NAME = "polymarket_complete_fetch_cache.sqlite3"
@@ -981,6 +981,7 @@ def append_position_completeness_summary(
         f"trades_only={score.get('tradesOnlyRows', '-')} "
         f"unresolved_trades={score.get('unresolvedTradeRows', '-')} "
         f"trade_status={score.get('tradeVerificationStatus', '-')} "
+        f"refetch_attempts={score.get('refetchAttempts', 0)} "
         f"pagination=trades:{score.get('tradePaginationComplete', False)},"
         f"activity:{score.get('activityPaginationComplete', False)} "
         f"fetch_complete={bool(fetch_complete)} "
@@ -3047,7 +3048,16 @@ def trade_event_unique_key(row: dict[str, Any]) -> str:
         )
     )
     prefix = "core:" if valid_hash else "secondary-unverified:"
-    return prefix + hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+    # Keep the canonical second outside the digest so a mismatch can be
+    # re-fetched narrowly instead of downloading the wallet again.
+    timestamp_token = timestamp if re.fullmatch(r"\d+", timestamp) else "unknown"
+    digest = hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+    return f"{prefix}{timestamp_token}:{digest}"
+
+
+def trade_event_timestamp_from_key(event_key: str) -> int | None:
+    match = re.match(r"^(?:core|secondary-unverified):(\d+):", str(event_key))
+    return int(match.group(1)) if match else None
 
 
 def trade_evidence_from_rows(
@@ -3660,6 +3670,75 @@ def compare_trade_occurrence_multisets(
         "tradeRowVerificationStatus": "verified" if unresolved == 0 else verification_status,
         "tradeRowSetsEqual": bool(missing == 0 and extra == 0),
     }
+
+
+def refetch_trade_mismatch_windows(
+    client: PolymarketClient,
+    wallet: str,
+    trades_occurrences: dict[str, tuple[str, str, int]],
+    activity_occurrences: dict[str, tuple[str, str, int]],
+    snapshot_end: int,
+) -> tuple[dict[str, tuple[str, str, int]], dict[str, tuple[str, str, int]], int]:
+    """Re-read only mismatch seconds twice and accept only stable evidence."""
+    initial = compare_trade_occurrence_multisets(trades_occurrences, activity_occurrences)
+    if not int(initial.get("unresolvedTradeRows") or 0):
+        return trades_occurrences, activity_occurrences, 0
+    trade_counts = {key: int(value[2]) for key, value in trades_occurrences.items()}
+    activity_counts = {key: int(value[2]) for key, value in activity_occurrences.items()}
+    mismatch_keys = {
+        key for key in set(trade_counts) | set(activity_counts)
+        if trade_counts.get(key, 0) != activity_counts.get(key, 0)
+    }
+    seconds = sorted({
+        timestamp for key in mismatch_keys
+        if (timestamp := trade_event_timestamp_from_key(key)) is not None
+        and timestamp <= int(snapshot_end)
+    })
+    if not seconds:
+        return trades_occurrences, activity_occurrences, 0
+    windows: list[tuple[int, int]] = []
+    for timestamp in seconds:
+        start, end = max(1, timestamp - 1), min(int(snapshot_end), timestamp + 1)
+        if windows and start <= windows[-1][1] + 1:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    previous_signature: tuple[Any, ...] | None = None
+    stable_result: tuple[dict[str, tuple[str, str, int]], dict[str, tuple[str, str, int]]] | None = None
+    for attempt in range(1, 3):
+        refreshed_trades, refreshed_activity = dict(trades_occurrences), dict(activity_occurrences)
+        valid_attempt = True
+        for start, end in windows:
+            try:
+                trade_rows = activity_request(client, wallet, start, end, 0)
+                activity_rows = independent_activity_trade_request(client, wallet, start, end, 0)
+            except Exception:
+                valid_attempt = False
+                break
+            if len(trade_rows) >= TRADE_PAGE_LIMIT or len(activity_rows) >= ACTIVITY_PAGE_LIMIT:
+                valid_attempt = False
+                break
+            for target in (refreshed_trades, refreshed_activity):
+                for key in list(target):
+                    event_timestamp = trade_event_timestamp_from_key(key)
+                    if event_timestamp is not None and start <= event_timestamp <= end:
+                        target.pop(key, None)
+            refreshed_trades.update(trade_occurrence_evidence_from_rows(trade_rows))
+            refreshed_activity.update(trade_occurrence_evidence_from_rows(activity_rows))
+        if valid_attempt:
+            signature = (
+                tuple(sorted((key, value[2]) for key, value in refreshed_trades.items())),
+                tuple(sorted((key, value[2]) for key, value in refreshed_activity.items())),
+            )
+            if signature == previous_signature:
+                stable_result = (refreshed_trades, refreshed_activity)
+                break
+            previous_signature = signature
+        if attempt < 2:
+            time.sleep(min(2.0, 0.5 * attempt))
+    if stable_result is None:
+        return trades_occurrences, activity_occurrences, 2
+    return stable_result[0], stable_result[1], 2
 
 
 def get_complete_activity_markets(
@@ -5945,6 +6024,7 @@ def add_polymarket_trade_metrics(
         "tradesOnlyRows", "exactRepeatedRows", "valueDifferenceRows",
         "sideDifferenceRows", "onchainVerifiedRows", "verifiedTradeRows",
         "unresolvedTradeRows", "tradeVerificationStatus", "verificationReason",
+        "refetchAttempts",
     ):
         enriched[audit_field] = row_verification.get(audit_field, "")
     enriched["downloadedTradeRows"] = max(
@@ -6440,6 +6520,24 @@ def rank_wallets(
                     primary_trade_occurrences,
                     independent_trade_occurrences,
                 )
+                refetch_attempts = 0
+                if int(trade_row_verification.get("unresolvedTradeRows") or 0):
+                    (
+                        primary_trade_occurrences,
+                        independent_trade_occurrences,
+                        refetch_attempts,
+                    ) = refetch_trade_mismatch_windows(
+                        client,
+                        seed.proxy_wallet,
+                        primary_trade_occurrences,
+                        independent_trade_occurrences,
+                        trade_snapshot_end,
+                    )
+                    trade_row_verification = compare_trade_occurrence_multisets(
+                        primary_trade_occurrences,
+                        independent_trade_occurrences,
+                    )
+                trade_row_verification["refetchAttempts"] = refetch_attempts
                 trade_row_verification["snapshotStart"] = snapshot_start
                 trade_row_verification["snapshotEnd"] = trade_snapshot_end
             except Exception as exc:
