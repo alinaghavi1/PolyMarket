@@ -10075,7 +10075,9 @@ GLOBAL_QUEUE_RUNTIME_DIR_NAME = "_queue_runtime"
 GLOBAL_QUEUE_BUCKET_COUNT = 512
 GLOBAL_QUEUE_BATCH_SIZE = 8
 GLOBAL_QUEUE_COMPLETE_ALL_WALLETS = True
-GLOBAL_QUEUE_MAX_ATTEMPTS_PER_WALLET = 0  # در Complete-all نادیده گرفته می‌شود؛ هیچ والت نهایی حذف نمی‌شود.
+# A stable unresolved wallet must not loop forever in one run.  failed_final is
+# not scored and is revived on the next run (for example after RPC is configured).
+GLOBAL_QUEUE_MAX_ATTEMPTS_PER_WALLET = 3
 GLOBAL_QUEUE_IMPORT_OLD_PARTS = True
 GLOBAL_QUEUE_FINAL_MERGE_ON_EXIT = True
 GLOBAL_QUEUE_MERGE_RAW_JSONL = False
@@ -11625,8 +11627,7 @@ class GlobalQueueState:
                 retry_count = int(row["retry_count"] or 0) if row else 0
                 unexpected_failures = int(row["unexpected_failures"] or 0) if row else 0
                 final = bool(
-                    not bool(GLOBAL_QUEUE_COMPLETE_ALL_WALLETS)
-                    and GLOBAL_QUEUE_MAX_ATTEMPTS_PER_WALLET > 0
+                    GLOBAL_QUEUE_MAX_ATTEMPTS_PER_WALLET > 0
                     and attempts >= GLOBAL_QUEUE_MAX_ATTEMPTS_PER_WALLET
                 )
 
@@ -11812,8 +11813,6 @@ class GlobalQueueState:
 
     def all_finished(self) -> bool:
         counts = self.counts()
-        if bool(GLOBAL_QUEUE_COMPLETE_ALL_WALLETS):
-            return counts["total"] > 0 and counts["done"] >= counts["total"]
         return counts["total"] > 0 and counts["done"] + counts["failed"] >= counts["total"]
 
     def close(self) -> None:
