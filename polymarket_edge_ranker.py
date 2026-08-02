@@ -719,6 +719,9 @@ DIAGNOSTIC_LOG_FILE_NAME = "diagnostics_summary.log"
 # Copy/paste friendly proof of position completeness.  Unlike the technical
 # diagnostics this contains one bounded line per checked wallet and no proxy data.
 POSITION_COMPLETENESS_LOG_FILE_NAME = "position_completeness_summary.log"
+# Worker evidence stays internal; users see exactly one merged summary beside
+# diagnostics_summary.log in the run root.
+POSITION_COMPLETENESS_WORKER_LOG_FILE_NAME = ".position_completeness_worker.log"
 DIAGNOSTIC_LOG_INTERVAL_SECONDS = 60.0
 DIAGNOSTIC_STALL_SECONDS = 300.0
 DIAGNOSTIC_OLDEST_WORKERS = 8
@@ -994,7 +997,7 @@ def merge_position_completeness_summaries(
     """Create one compact latest-verdict-per-wallet log from worker logs."""
     latest: dict[str, str] = {}
     for directory in sources:
-        path = directory / POSITION_COMPLETENESS_LOG_FILE_NAME
+        path = directory / POSITION_COMPLETENESS_WORKER_LOG_FILE_NAME
         if not path.exists():
             continue
         try:
@@ -6030,7 +6033,12 @@ def rank_wallets(
     secondary_page_cache_path = out_dir / SECONDARY_CLOSED_POSITION_PAGE_CACHE_FILE_NAME
     universe_path = out_dir / "wallet_universe.csv"
     complete_fetch_db_path = out_dir / COMPLETE_FETCH_CACHE_DB_FILE_NAME
-    position_summary_path = out_dir / POSITION_COMPLETENESS_LOG_FILE_NAME
+    position_summary_path = out_dir / (
+        POSITION_COMPLETENESS_WORKER_LOG_FILE_NAME
+        if str(test_memory_file_name or TEST_MEMORY_FILE_NAME)
+        != TEST_MEMORY_FILE_NAME
+        else POSITION_COMPLETENESS_LOG_FILE_NAME
+    )
 
     ranked_wallets = (
         list(wallets.values())
@@ -12755,6 +12763,7 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         f"  All logs:    {root / ALL_LOG_FILE_NAME}\n"
         f"  Errors:      {root / ERROR_LOG_FILE_NAME}\n"
         f"  Diagnostics: {root / DIAGNOSTIC_LOG_FILE_NAME}\n"
+        f"  Position audit: {root / POSITION_COMPLETENESS_LOG_FILE_NAME}\n"
         f"  Active VPNs: {root / ACTIVE_VPN_FILE_NAME}\n"
         f"Startup settings\n"
         f"  VPN test workers: {VPN_STARTUP_TEST_WORKERS}\n"
@@ -13415,6 +13424,13 @@ def run_global_queue_manager(args: argparse.Namespace) -> int:
         now = time.monotonic()
         if not force and now - diagnostic_last_snapshot < float(DIAGNOSTIC_LOG_INTERVAL_SECONDS):
             return
+
+        # Keep the single user-facing compact audit visible beside
+        # diagnostics_summary.log throughout the run, not only after shutdown.
+        merge_position_completeness_summaries(
+            _discover_resume_sources(root, fallback),
+            root / POSITION_COMPLETENESS_LOG_FILE_NAME,
+        )
 
         counts = queue.counts()
         interval_seconds = max(0.001, now - diagnostic_previous_snapshot)
